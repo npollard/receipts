@@ -1,3 +1,4 @@
 *.swp
 npollard-venv
 imgs/*
+.env
