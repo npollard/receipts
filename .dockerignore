@@ -1,0 +1,13 @@
+.git
+.gitignore
+*.swp
+npollard-venv
+.env
+.env.example
+*.pyc
+__pycache__/
+.pytest_cache/
+.coverage
+.DS_Store
+.vscode/
+.idea/
