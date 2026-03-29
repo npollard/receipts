@@ -53,7 +53,7 @@ class ReceiptParser(AIParser):
             # Validate with Pydantic
             try:
                 validated = Receipt(**parsed_data)
-                result = validated.dict()
+                result = validated.model_dump()
 
                 # Add token usage to response data
                 result["_token_usage"] = {

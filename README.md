@@ -8,7 +8,7 @@ This project uses LangChain/LangGraph for workflow management with modular OOP a
 
 ### Prerequisites
 
-- Python 3.14+
+- Python 2.7.4+
 - OpenAI API key
 - Tesseract OCR
 
