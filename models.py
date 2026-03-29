@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, ValidationInfo
 
 
 class ReceiptItem(BaseModel):
@@ -28,9 +28,12 @@ class Receipt(BaseModel):
 
     @field_validator('total')
     @classmethod
-    def validate_total(cls, v, values):
-        if v is not None and 'items' in values:
-            calculated_total = sum(item.price for item in values['items'])
+    def validate_total(cls, v, info: ValidationInfo):
+        # Get the validated data from context
+        data = info.data if hasattr(info, 'data') else {}
+
+        if v is not None and 'items' in data:
+            calculated_total = sum(item.price for item in data['items'])
             if abs(v - calculated_total) > Decimal('0.01'):  # Allow small rounding differences
                 raise ValueError(f'Total {v} does not match sum of items {calculated_total}')
         return v

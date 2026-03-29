@@ -1,7 +1,15 @@
 """Main entry point for receipt processing"""
 
+import logging
 from pathlib import Path
 from receipt_processor import ReceiptProcessor
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 def process_image_with_langgraph(image_path: str) -> Dict[str, Any]:
@@ -21,7 +29,7 @@ def process_image_with_langchain_chains(image_path: str):
     from langchain_core.runnables import RunnableLambda
     import json
     from api_response import APIResponse
-    
+
     processor = ReceiptProcessor()
 
     try:
@@ -42,25 +50,23 @@ def process_image_with_langchain_chains(image_path: str):
 
         result = processing_chain.invoke(image_path)
 
-        print(f"\n\n****************")
-        print(f"Processing: {result['image_path']}")
-        print(f"OCR Text:\n{result['ocr_text']}")
-        print('****************')
+        logger.info(f"Chain processing: {result['image_path']}")
+        logger.info(f"OCR Text: {result['ocr_text'][:100]}..." if len(result['ocr_text']) > 100 else f"OCR Text: {result['ocr_text']}")
 
         if result["result"].status == "success":
-            print(f"Parsed Receipt:\n{json.dumps(result['result'].data, indent=2)}")
+            logger.info(f"Parsed Receipt: {json.dumps(result['result'].data, indent=2)}")
             return APIResponse.success({
                 "image_path": result["image_path"],
                 "ocr_text": result["ocr_text"],
                 "parsed_receipt": result["result"].data
             })
         else:
-            print(f"Parsing Error: {result['result'].error}")
+            logger.error(f"Parsing Error: {result['result'].error}")
             return APIResponse.failure(f"Failed to parse receipt: {result['result'].error}")
 
     except Exception as e:
         error_msg = f"Chain processing error: {str(e)}"
-        print(f"Error: {error_msg}")
+        logger.error(error_msg)
         return APIResponse.failure(error_msg)
 
 
@@ -77,8 +83,8 @@ if __name__ == "__main__":
     filenames = list(Path('./imgs').rglob('*.jpg'))
     processor = ReceiptProcessor()
 
-    print("Starting receipt processing session...")
-    print(f"Found {len(filenames)} images to process")
+    logger.info("Starting receipt processing session...")
+    logger.info(f"Found {len(filenames)} images to process")
 
     # Reset token usage for fresh session
     processor.reset_token_usage()
@@ -87,7 +93,7 @@ if __name__ == "__main__":
     failed_processes = 0
 
     for filename in filenames:
-        print(f"\n{'='*50}")
+        logger.info(f"{'='*50}")
 
         # Choose processing method:
         # 1. LangGraph workflow (recommended)
@@ -102,19 +108,24 @@ if __name__ == "__main__":
         # Track success/failure
         if isinstance(result, dict) and result.get('parsed_receipt', {}).get('status') == 'failed':
             failed_processes += 1
-            print(f"❌ FAILED: {result['parsed_receipt'].get('error', 'Unknown error')}")
+            logger.error(f"❌ FAILED: {result['parsed_receipt'].get('error', 'Unknown error')}")
         elif hasattr(result, 'status') and result.status == 'failed':
             failed_processes += 1
-            print(f"❌ FAILED: {result.error}")
+            logger.error(f"❌ FAILED: {result.error}")
         else:
             successful_processes += 1
-            print("✅ SUCCESS")
+            logger.info("✅ SUCCESS")
 
     # Print token usage summary at end
-    print("\n" + "="*50)
-    print("SESSION COMPLETE")
-    print(f"✅ Successful: {successful_processes}")
-    print(f"❌ Failed: {failed_processes}")
-    print(f"📊 Success Rate: {(successful_processes / len(filenames) * 100):.1f}%" if filenames else "No files processed")
-    print(processor.get_token_usage_summary())
-    print("="*50)
+    logger.info("="*50)
+    logger.info("SESSION COMPLETE")
+    logger.info(f"✅ Successful: {successful_processes}")
+    logger.info(f"❌ Failed: {failed_processes}")
+    if filenames:
+        logger.info(f"📊 Success Rate: {(successful_processes / len(filenames) * 100):.1f}%")
+    else:
+        logger.info("No files processed")
+
+    summary = processor.get_token_usage_summary()
+    logger.info(summary)
+    logger.info("="*50)
