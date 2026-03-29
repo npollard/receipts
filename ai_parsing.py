@@ -93,9 +93,29 @@ class ReceiptParser(AIParser):
 
             except ValidationError as e:
                 logger.warning(f"Validation failed: {e.errors()}")
+
+                # Convert validation errors to JSON-serializable format
+                serializable_errors = []
+                for error in e.errors():
+                    serializable_error = {
+                        'loc': error.get('loc', []),
+                        'msg': error.get('msg', ''),
+                        'type': error.get('type', ''),
+                        'ctx': error.get('ctx', {})
+                    }
+                    # Convert any non-serializable objects in ctx
+                    if 'ctx' in error and error['ctx']:
+                        for key, value in error['ctx'].items():
+                            if hasattr(value, '__dict__'):
+                                serializable_error['ctx'][key] = str(value)
+                            elif not isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                                serializable_error['ctx'][key] = str(value)
+
+                    serializable_errors.append(serializable_error)
+
                 validation_error = {
                     "error": "validation_failed",
-                    "details": e.errors(),
+                    "details": serializable_errors,
                     "raw": parsed_data
                 }
 
