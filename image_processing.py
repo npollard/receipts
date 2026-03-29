@@ -70,18 +70,19 @@ class VisionProcessor(ImageProcessor):
             # Encode image
             base64_image = self._preprocess_image(image_path)
 
-            # Create vision prompt
+            # Create vision prompt with structured output requirements
             vision_prompt = """
-            Extract all text from this receipt image.
-            Return the text exactly as it appears, including:
-            - Store name/location
-            - Date
-            - All items with prices
-            - Total amount
-            - Any other visible text
+Extract all text from this receipt image exactly as it appears.
+Focus on:
+- Store name/location
+- Date and time
+- All individual items with prices
+- Subtotals and final total
+- Any other visible text (tax, phone numbers, etc.)
 
-            Format the output as clean, readable text.
-            """
+Return the extracted text in a clean, readable format.
+Preserve the original layout and formatting as much as possible.
+"""
 
             # Create message with image
             message = HumanMessage(

@@ -34,7 +34,28 @@ class ReceiptParser(AIParser):
             temperature=temperature,
             api_key=os.environ.get("OPENAI_API_KEY")
         )
-        self._system_prompt = "You are a receipt parser that returns valid JSON only."
+        self._system_prompt = """
+You are a receipt parser that returns ONLY valid JSON.
+
+Return JSON in this exact schema:
+{
+  "date": "ISO-8601 date string or null",
+  "total": number or null,
+  "items": [
+    {
+      "name": "item name",
+      "category": "category",
+      "price": number
+    }
+  ]
+}
+
+CRITICAL RULES:
+- Return ONLY the JSON object
+- No explanations, no markdown, no code blocks
+- All prices must be numbers
+- If you cannot extract data, return: {"date": null, "total": null, "items": []}
+"""
         logger.info(f"Initialized ReceiptParser with model: {model_name}")
 
     def parse(self, text: str) -> APIResponse:
@@ -150,17 +171,10 @@ class ReceiptParser(AIParser):
     def _build_prompt(self, ocr_text: str) -> str:
         """Build the parsing prompt"""
         return f"""
-You are a receipt parser.
-
-Given the OCR text below, extract:
-- Date
-- Items (name, category, price paid)
-- Total
-
-IMPORTANT: Return ONLY valid JSON. No explanations, no markdown, no code blocks.
-If you cannot extract valid data, return:
-{{"date": null, "items": [], "total": null}}
+Extract receipt data from this OCR text and return ONLY valid JSON:
 
 OCR TEXT:
 {ocr_text}
+
+Remember: Return ONLY the JSON object, nothing else.
 """
