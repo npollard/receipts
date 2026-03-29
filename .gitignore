@@ -2,3 +2,4 @@
 npollard-venv
 imgs/*
 .env
+__pycache__
