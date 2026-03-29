@@ -3,6 +3,8 @@
 import logging
 from pathlib import Path
 from receipt_processor import ReceiptProcessor
+from ai_parsing_with_persistence import ReceiptParser
+from token_usage_persistence import TokenUsagePersistence
 
 # Configure logging
 logging.basicConfig(
@@ -10,6 +12,29 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def print_usage_summary():
+    """Print token usage summary from persistent storage"""
+    persistence = TokenUsagePersistence()
+    summary = persistence.get_usage_summary()
+
+    print("=" * 50)
+    print("TOKEN USAGE SUMMARY")
+    print("=" * 50)
+    print(f"Total Sessions: {summary['total_sessions']}")
+    print(f"Total Input Tokens: {summary['total_input_tokens']:,}")
+    print(f"Total Output Tokens: {summary['total_output_tokens']:,}")
+    print(f"Total All Tokens: {summary['total_tokens']:,}")
+    print(f"Total Estimated Cost: ${summary['total_estimated_cost']:.4f}")
+    print("=" * 50)
+
+    if 'recent_sessions' in summary:
+        print("RECENT SESSIONS:")
+        for i, session in enumerate(summary['recent_sessions'], 1):
+            print(f"  {i}. Session {session.get('session_id', 'unknown')}: "
+                  f"{session['total_tokens']} tokens, "
+                  f"${session.get('estimated_cost', 0):.4f}")
 
 
 def process_image_with_langgraph(image_path: str) -> Dict[str, Any]:
@@ -79,40 +104,22 @@ def _is_valid_json(text: str) -> bool:
         return False
 
 
-if __name__ == "__main__":
-    filenames = list(Path('./imgs').rglob('*.jpg'))
-    processor = ReceiptProcessor()
-
-    logger.info("Starting receipt processing session...")
-    logger.info(f"Found {len(filenames)} images to process")
-
-    # Reset token usage for fresh session
-    processor.reset_token_usage()
-
-    successful_processes = 0
-    failed_processes = 0
-
-    for filename in filenames:
-        logger.info(f"{'='*50}")
-
-        # Choose processing method:
-        # 1. LangGraph workflow (recommended)
-        result = processor.process_with_langgraph(str(filename))
-
-        # 2. Direct processing (simpler)
-        # result = processor.process_directly(str(filename))
-
-        # 3. Pure LangChain chains
-        # result = process_image_with_langchain_chains(str(filename))
-
-        # Track success/failure
-        if isinstance(result, dict) and result.get('parsed_receipt', {}).get('status') == 'failed':
-            failed_processes += 1
-            logger.error(f"❌ FAILED: {result['parsed_receipt'].get('error', 'Unknown error')}")
-        elif hasattr(result, 'status') and result.status == 'failed':
-            failed_processes += 1
-            logger.error(f"❌ FAILED: {result.error}")
+def print_results(result, mode):
+    if mode == 'direct':
+        if result.status == 'success':
+            logger.info(f"Parsed Receipt: {json.dumps(result.data, indent=2)}")
         else:
+            logger.error(f"Parsing Error: {result.error}")
+    elif mode == 'langgraph':
+        if result.get('parsed_receipt', {}).get('status') == 'success':
+            logger.info(f"Parsed Receipt: {json.dumps(result['parsed_receipt'].get('data', {}), indent=2)}")
+        else:
+            logger.error(f"Parsing Error: {result['parsed_receipt'].get('error', 'Unknown error')}")
+    elif mode == 'chain':
+        if result.status == 'success':
+            logger.info(f"Parsed Receipt: {json.dumps(result.data.get('parsed_receipt', {}), indent=2)}")
+        else:
+            logger.error(f"Parsing Error: {result.error}")
             successful_processes += 1
             logger.info("✅ SUCCESS")
 
