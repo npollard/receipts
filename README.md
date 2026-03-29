@@ -2,48 +2,66 @@
 
 Leverage AI to take images of receipts and tell me where all my grocery money is going.
 
-## Docker Setup with LangChain/LangGraph
+## LangChain/LangGraph Setup
 
-This project has been dockerized and uses LangChain/LangGraph for workflow management.
+This project uses LangChain/LangGraph for workflow management with OOP architecture.
 
 ### Prerequisites
 
-- Docker and Docker Compose
+- Python 3.14+
 - OpenAI API key
+- Tesseract OCR
 
 ### Setup
 
-1. Copy the environment file:
+1. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+2. Install Tesseract OCR:
+- **macOS**: `brew install tesseract`
+- **Ubuntu**: `sudo apt-get install tesseract-ocr`
+- **Windows**: Download from [Tesseract UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
+
+3. Set up environment:
 ```bash
 cp .env.example .env
+# Add your OpenAI API key to .env
 ```
 
-2. Add your OpenAI API key to `.env`:
-```
-OPENAI_API_KEY=your_actual_api_key_here
-```
-
-3. Place receipt images in the `imgs/` directory (supports .jpg files)
+4. Place receipt images in the `imgs/` directory (supports .jpg files)
 
 ### Running
 
-Option 1: Using Docker Compose (recommended):
 ```bash
-docker-compose up --build
-```
-
-Option 2: Using Docker directly:
-```bash
-docker build -t receipts .
-docker run -v $(pwd)/imgs:/app/imgs --env-file .env receipts
+python receipts.py
 ```
 
 ### Architecture
 
-The application uses LangChain/LangGraph with the following workflow:
+The application uses LangChain/LangGraph with OOP design:
+
+**Classes:**
+- **`ImageProcessor`** (ABC) - Abstract interface for image processing
+- **`OCRProcessor`** - OpenCV/Tesseract implementation
+- **`AIParser`** (ABC) - Abstract interface for AI parsing
+- **`ReceiptParser`** - OpenAI GPT-4o-mini implementation
+- **`WorkflowOrchestrator`** - Coordinates workflow with token tracking
+- **`ReceiptProcessor`** - Main facade class
+
+**Processing Workflow:**
 1. **OCR Extraction**: Extract text from receipt images using Tesseract
 2. **AI Parsing**: Use OpenAI GPT-4o-mini to parse OCR text into structured JSON
-3. **Results Output**: Print parsed receipt data
+3. **Token Tracking**: Monitor OpenAI API usage and costs
+
+### Token Usage
+
+The application tracks OpenAI token usage and provides:
+- Input/output token counts
+- Request count
+- Session duration
+- Estimated cost (GPT-4o-mini pricing)
 
 ### Dependencies
 
@@ -51,3 +69,4 @@ The application uses LangChain/LangGraph with the following workflow:
 - Tesseract for OCR
 - LangChain/LangGraph for workflow orchestration
 - OpenAI for receipt parsing
+- python-dotenv for environment management
