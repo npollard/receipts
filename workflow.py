@@ -5,7 +5,7 @@ from typing import Dict, Any
 import json
 
 from image_processing import ImageProcessor
-from ai_parsing import AIParser
+from ai_parsing import ReceiptParser
 from token_tracking import TokenUsage
 from api_response import APIResponse
 from langgraph.graph import StateGraph, START, END
@@ -27,7 +27,7 @@ class State(TypedDict):
 class WorkflowOrchestrator:
     """Orchestrates the receipt processing workflow with token tracking"""
 
-    def __init__(self, image_processor: ImageProcessor, ai_parser: AIParser):
+    def __init__(self, image_processor: ImageProcessor, ai_parser: ReceiptParser):
         self.image_processor = image_processor
         self.ai_parser = ai_parser
         self.token_usage = TokenUsage()

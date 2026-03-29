@@ -1,7 +1,6 @@
 """AI parsing utilities"""
 
 import logging
-from abc import ABC, abstractmethod
 from typing import Dict, Any
 import json
 import os
@@ -16,16 +15,7 @@ from api_response import APIResponse
 logger = logging.getLogger(__name__)
 
 
-class AIParser(ABC):
-    """Abstract base class for AI parsing"""
-
-    @abstractmethod
-    def parse(self, text: str) -> APIResponse:
-        """Parse OCR text into structured data"""
-        pass
-
-
-class ReceiptParser(AIParser):
+class ReceiptParser:
     """Concrete implementation of receipt parsing using OpenAI"""
 
     def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.0):
@@ -51,7 +41,7 @@ Return JSON in this exact schema:
 }
 
 CRITICAL RULES:
-- Return ONLY the JSON object
+- Return ONLY: JSON object
 - No explanations, no markdown, no code blocks
 - All prices must be numbers
 - If you cannot extract data, return: {"date": null, "total": null, "items": []}
@@ -230,7 +220,130 @@ Return ONLY: corrected JSON object. No explanations.
         logger.debug(f"Starting parsing with up to {max_retries} retries")
 
         # First attempt
-        result = self.parse(text)
+        result = self.parse_text(text)
+
+        if result.status == "success":
+            logger.info("Parsing successful on attempt 1")
+            # Update token usage tracker if successful
+            if result.data and "_token_usage" in result.data:
+                token_usage.add_usage(
+                    self._get_token_usage_safely(result.data, 'input_tokens'),
+                    self._get_token_usage_safely(result.data, 'output_tokens')
+                )
+            return result
+
+        # If parsing failed, try to fix with agent
+        logger.warning(f"Parse attempt 1 failed: {result.error}")
+
+        for attempt in range(1, max_retries):
+            # If this is the last attempt, don't retry
+            if attempt == max_retries:
+                logger.error(f"Max retries ({max_retries}) exceeded")
+                return result
+
+            # For retry attempts, try to fix the response
+            fix_result = self._attempt_fix(text, result.data if result.data else {}, attempt,
+                                    (result.data.get('_token_usage', {}) or {}).get('input_tokens', 0) if result.data else 0,
+                                    (result.data.get('_token_usage', {}) or {}).get('output_tokens', 0) if result.data else 0)
+
+            if fix_result.status == "success":
+                logger.info(f"Successfully fixed and validated on attempt {attempt + 1}")
+                # Update token usage tracker
+                if fix_result.data and "_token_usage" in fix_result.data:
+                    token_usage.add_usage(
+                        fix_result.data["_token_usage"]["input_tokens"],
+                        fix_result.data["_token_usage"]["output_tokens"]
+                    )
+                return fix_result
+
+        # Should never reach here, but just in case
+        return APIResponse.failure("Max retries exceeded with persistent errors")
+
+    def parse_with_usage_tracking(self, text: str, token_usage) -> APIResponse:
+        """Parse with token usage tracking"""
+        result = self.parse_with_retry(text, token_usage)
+        return result
+
+    def _build_prompt(self, ocr_text: str) -> str:
+        """Build the parsing prompt"""
+        return f"""
+Extract receipt data from this OCR text and return ONLY valid JSON:
+
+OCR TEXT:
+{ocr_text}
+
+Remember: Return ONLY: JSON object, nothing else.
+"""
+
+    def parse_text(self, text: str) -> APIResponse:
+        """Main parsing method for OCR text into structured receipt data"""
+        logger.debug(f"Parsing OCR text of length: {len(text)}")
+        logger.debug(f"OCR text content: {repr(text[:200])}...")  # Log raw text for debugging
+
+        prompt = self._build_prompt(text)
+        messages = [
+            SystemMessage(content=self._system_prompt),
+            HumanMessage(content=prompt)
+        ]
+
+        try:
+            response = self.llm.invoke(messages)
+
+            # Log raw response content for debugging
+            logger.debug(f"Raw response content: {repr(response.content)}")
+            logger.debug(f"Response type: {type(response.content)}")
+            logger.debug(f"Response length: {len(response.content)}")
+
+            # Extract token usage from response
+            input_tokens, output_tokens, total_tokens = self._extract_token_usage(response)
+            logger.info(f"Token usage - Input: {input_tokens}, Output: {output_tokens}")
+
+            # Check if response content is empty or invalid
+            if not response.content or not response.content.strip():
+                logger.error("Empty response from OpenAI")
+                return APIResponse.failure("Empty response from AI model")
+
+            # Try to parse JSON
+            try:
+                parsed_data = json.loads(response.content)
+                logger.debug(f"Parsed JSON data: {parsed_data}")
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {str(e)}")
+                logger.error(f"Response content that failed: {repr(response.content)}")
+                return APIResponse.failure(f"Failed to parse JSON: {str(e)}")
+
+            # Validate with Pydantic v2
+            try:
+                validated = Receipt.model_validate(parsed_data)
+                result = validated.model_dump()
+                logger.info(f"Successfully validated receipt with {len(result.get('items', []))} items")
+
+                # Convert Decimal objects to floats for JSON serialization
+                result = self._convert_decimals_to_floats(result)
+
+                # Add token usage to response data
+                result["_token_usage"] = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens
+                }
+
+                return APIResponse.success(result)
+
+            except ValidationError as e:
+                logger.warning(f"Validation failed: {e.errors()}")
+                return self._handle_validation_error(e, parsed_data, input_tokens, output_tokens)
+
+        except Exception as e:
+            logger.error(f"Unexpected parsing error: {str(e)}")
+            return APIResponse.failure(f"Parsing error: {str(e)}")
+
+    def parse_with_retry(self, text: str, token_usage, max_retries: int = 3) -> APIResponse:
+        """Parse with retry mechanism and agent loop for fixing errors"""
+        logger.debug(f"Starting parsing with up to {max_retries} retries")
+
+        # First attempt
+        result = self.parse_text(text)
 
         if result.status == "success":
             logger.info("Parsing successful on attempt 1")
@@ -251,10 +364,10 @@ Return ONLY: corrected JSON object. No explanations.
                 logger.error(f"Max retries ({max_retries}) exceeded")
                 return result
 
-            # For retry attempts, try to fix the response
-            fix_result = self._attempt_fix(text, result.data, attempt,
-                                    result.data.get('_token_usage', {}).get('input_tokens', 0),
-                                    result.data.get('_token_usage', {}).get('output_tokens', 0))
+            # For retry attempts, try to fix with agent
+            fix_result = self._attempt_fix(text, result.data if result.data is not None else {}, attempt,
+                                    self._get_token_usage_safely(result.data, 'input_tokens') if result.data is not None else 0,
+                                    self._get_token_usage_safely(result.data, 'output_tokens') if result.data is not None else 0)
 
             if fix_result.status == "success":
                 logger.info(f"Successfully fixed and validated on attempt {attempt + 1}")
