@@ -4,11 +4,12 @@ import json
 import pytesseract
 from pathlib import Path
 from PIL import Image
-from typing import Dict, Any, List, Protocol
+from typing import Dict, Any, List, Protocol, Optional
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
@@ -17,6 +18,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from typing_extensions import Annotated, TypedDict
 from langchain_core.runnables import RunnableLambda
+from pydantic import BaseModel, ValidationError, field_validator
 
 load_dotenv()
 
@@ -36,6 +38,34 @@ class APIResponse:
     def failure(cls, error: str) -> 'APIResponse':
         """Create a failed response"""
         return cls(status="failed", error=error, data=None)
+
+class ReceiptItem(BaseModel):
+    """Individual receipt item model"""
+    name: str
+    category: str
+    price: Decimal
+
+    @field_validator('price')
+    @classmethod
+    def validate_price(cls, v):
+        if v < 0:
+            raise ValueError('Price must be non-negative')
+        return v
+
+class Receipt(BaseModel):
+    """Main receipt data model"""
+    date: Optional[str] = None
+    items: List[ReceiptItem] = []
+    total: Optional[Decimal] = None
+
+    @field_validator('total')
+    @classmethod
+    def validate_total(cls, v, values):
+        if v is not None and 'items' in values:
+            calculated_total = sum(item.price for item in values['items'])
+            if abs(v - calculated_total) > Decimal('0.01'):  # Allow small rounding differences
+                raise ValueError(f'Total {v} does not match sum of items {calculated_total}')
+        return v
 
 @dataclass
 class TokenUsage:
@@ -160,17 +190,35 @@ class ReceiptParser(AIParser):
 
             parsed_data = json.loads(response.content)
 
-            # Add token usage to the response data
-            result_data = {
-                **parsed_data,
-                "_token_usage": {
+            # Validate with Pydantic
+            try:
+                validated = Receipt(**parsed_data)
+                result = validated.dict()
+
+                # Add token usage to response data
+                result["_token_usage"] = {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "total_tokens": input_tokens + output_tokens
                 }
-            }
 
-            return APIResponse.success(result_data)
+                return APIResponse.success(result)
+
+            except ValidationError as e:
+                validation_error = {
+                    "error": "validation_failed",
+                    "details": e.errors(),
+                    "raw": parsed_data
+                }
+
+                # Add token usage to validation error
+                validation_error["_token_usage"] = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens
+                }
+
+                return APIResponse.success(validation_error)
 
         except json.JSONDecodeError as e:
             return APIResponse.failure(f"Failed to parse JSON: {str(e)}")
