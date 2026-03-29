@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any
 import json
 import os
+from decimal import Decimal
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
@@ -76,11 +77,20 @@ class ReceiptParser(AIParser):
                 logger.error(f"Response content that failed: {repr(response.content)}")
                 return APIResponse.failure(f"Failed to parse JSON: {str(e)}")
 
-            # Validate with Pydantic
+            # Validate with Pydantic v2
             try:
-                validated = Receipt(**parsed_data)
+                validated = Receipt.model_validate(parsed_data)
                 result = validated.model_dump()
                 logger.info(f"Successfully validated receipt with {len(result.get('items', []))} items")
+
+                # Convert Decimal objects to floats for JSON serialization
+                if 'items' in result:
+                    for item in result['items']:
+                        if 'price' in item and isinstance(item['price'], Decimal):
+                            item['price'] = float(item['price'])
+
+                if 'total' in result and isinstance(result['total'], Decimal):
+                    result['total'] = float(result['total'])
 
                 # Add token usage to response data
                 result["_token_usage"] = {
@@ -94,30 +104,21 @@ class ReceiptParser(AIParser):
             except ValidationError as e:
                 logger.warning(f"Validation failed: {e.errors()}")
 
-                # Convert validation errors to JSON-serializable format
-                serializable_errors = []
-                for error in e.errors():
-                    serializable_error = {
-                        'loc': error.get('loc', []),
-                        'msg': error.get('msg', ''),
-                        'type': error.get('type', ''),
-                        'ctx': error.get('ctx', {})
-                    }
-                    # Convert any non-serializable objects in ctx
-                    if 'ctx' in error and error['ctx']:
-                        for key, value in error['ctx'].items():
-                            if hasattr(value, '__dict__'):
-                                serializable_error['ctx'][key] = str(value)
-                            elif not isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                                serializable_error['ctx'][key] = str(value)
-
-                    serializable_errors.append(serializable_error)
-
+                # Convert validation errors to JSON-serializable format using Pydantic v2 methods
                 validation_error = {
                     "error": "validation_failed",
-                    "details": serializable_errors,
+                    "details": e.errors(),  # Pydantic v2 errors are already JSON-serializable
                     "raw": parsed_data
                 }
+
+                # Convert Decimal objects in raw data to floats for JSON serialization
+                if 'items' in parsed_data:
+                    for item in parsed_data['items']:
+                        if 'price' in item and isinstance(item['price'], Decimal):
+                            item['price'] = float(item['price'])
+
+                if 'total' in parsed_data and isinstance(parsed_data['total'], Decimal):
+                    parsed_data['total'] = float(parsed_data['total'])
 
                 # Add token usage to validation error
                 validation_error["_token_usage"] = {
@@ -126,7 +127,8 @@ class ReceiptParser(AIParser):
                     "total_tokens": input_tokens + output_tokens
                 }
 
-                return APIResponse.success(validation_error)
+                # Return FAILURE for validation errors, not success
+                return APIResponse.failure(f"Validation failed: {len(e.errors())} errors found")
 
         except Exception as e:
             logger.error(f"Unexpected parsing error: {str(e)}")

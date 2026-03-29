@@ -1,9 +1,18 @@
 """Data models for receipt processing"""
 
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 from pydantic import BaseModel, field_validator, ValidationInfo
+
+
+class DecimalEncoder(json.JSONEncoder):
+    """Custom JSON encoder for Decimal objects"""
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super().default(obj)
 
 
 class ReceiptItem(BaseModel):
@@ -14,7 +23,7 @@ class ReceiptItem(BaseModel):
 
     @field_validator('price')
     @classmethod
-    def validate_price(cls, v):
+    def validate_price(cls, v, info: ValidationInfo):
         if v < 0:
             raise ValueError('Price must be non-negative')
         return v
@@ -29,7 +38,7 @@ class Receipt(BaseModel):
     @field_validator('total')
     @classmethod
     def validate_total(cls, v, info: ValidationInfo):
-        # Get the validated data from context
+        # Get validated data from context
         data = info.data if hasattr(info, 'data') else {}
 
         if v is not None and 'items' in data:
@@ -37,3 +46,7 @@ class Receipt(BaseModel):
             if abs(v - calculated_total) > Decimal('0.01'):  # Allow small rounding differences
                 raise ValueError(f'Total {v} does not match sum of items {calculated_total}')
         return v
+
+    def model_dump_json(self, **kwargs) -> str:
+        """Custom JSON serialization that handles Decimal objects"""
+        return json.dumps(self.model_dump(), cls=DecimalEncoder, **kwargs)

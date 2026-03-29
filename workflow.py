@@ -11,6 +11,7 @@ from api_response import APIResponse
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from typing_extensions import Annotated, TypedDict
+from models import DecimalEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class WorkflowOrchestrator:
         logger.info("Initialized WorkflowOrchestrator")
 
     def process_image(self, image_path: str) -> APIResponse:
-        """Process a single image through the complete workflow"""
+        """Process a single image through complete workflow"""
         logger.info(f"Processing image: {image_path}")
 
         try:
@@ -47,7 +48,7 @@ class WorkflowOrchestrator:
             # Step 3: Output results
             if parse_result.status == "success":
                 logger.info(f"Successfully parsed receipt: {image_path}")
-                logger.debug(f"Parsed data: {json.dumps(parse_result.data, indent=2)}")
+                logger.debug(f"Parsed data: {json.dumps(parse_result.data, cls=DecimalEncoder, indent=2)}")
                 return APIResponse.success({
                     "image_path": image_path,
                     "ocr_text": ocr_text,
@@ -55,6 +56,7 @@ class WorkflowOrchestrator:
                 })
             else:
                 logger.error(f"Parsing failed for {image_path}: {parse_result.error}")
+                # Include validation details in error response for debugging
                 return APIResponse.failure(f"Failed to parse receipt: {parse_result.error}")
 
         except Exception as e:
@@ -99,6 +101,7 @@ class WorkflowOrchestrator:
             state['parsed_receipt'] = parse_result.data
             logger.debug("Parse node: success")
         else:
+            # Store failure information in parsed_receipt
             state['parsed_receipt'] = {
                 "status": "failed",
                 "error": parse_result.error,
@@ -110,5 +113,5 @@ class WorkflowOrchestrator:
 
     def _print_results_node(self, state: State) -> State:
         """LangGraph node for results output"""
-        logger.info(f"Final result: {json.dumps(state['parsed_receipt'], indent=2)}")
+        logger.info(f"Final result: {json.dumps(state['parsed_receipt'], cls=DecimalEncoder, indent=2)}")
         return state
