@@ -1,6 +1,6 @@
 """Main receipt processor class"""
 
-from image_processing import OCRProcessor
+from image_processing import VisionProcessor
 from ai_parsing import ReceiptParser
 from workflow import WorkflowOrchestrator
 from token_tracking import TokenUsage
@@ -12,7 +12,7 @@ class ReceiptProcessor:
     """Main processor class that coordinates all components"""
 
     def __init__(self):
-        self.image_processor = OCRProcessor()
+        self.image_processor = VisionProcessor()
         self.ai_parser = ReceiptParser()
         self.orchestrator = WorkflowOrchestrator(self.image_processor, self.ai_parser)
 

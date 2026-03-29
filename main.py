@@ -50,8 +50,8 @@ def process_image_with_langchain_chains(image_path: str):
 
         result = processing_chain.invoke(image_path)
 
-        logger.info(f"Chain processing: {result['image_path']}")
-        logger.info(f"OCR Text: {result['ocr_text'][:100]}..." if len(result['ocr_text']) > 100 else f"OCR Text: {result['ocr_text']}")
+        logger.info(f"Vision processing: {result['image_path']}")
+        logger.info(f"Extracted Text: {result['ocr_text'][:100]}..." if len(result['ocr_text']) > 100 else f"Extracted Text: {result['ocr_text']}")
 
         if result["result"].status == "success":
             logger.info(f"Parsed Receipt: {json.dumps(result['result'].data, indent=2)}")
@@ -65,7 +65,7 @@ def process_image_with_langchain_chains(image_path: str):
             return APIResponse.failure(f"Failed to parse receipt: {result['result'].error}")
 
     except Exception as e:
-        error_msg = f"Chain processing error: {str(e)}"
+        error_msg = f"Vision chain processing error: {str(e)}"
         logger.error(error_msg)
         return APIResponse.failure(error_msg)
 
