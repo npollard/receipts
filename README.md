@@ -2,9 +2,9 @@
 
 Leverage AI to take images of receipts and tell me where all my grocery money is going.
 
-## LangChain/LangGraph Setup
+## LangChain/LangGraph Setup with Modular Architecture
 
-This project uses LangChain/LangGraph for workflow management with OOP architecture.
+This project uses LangChain/LangGraph for workflow management with modular OOP architecture.
 
 ### Prerequisites
 
@@ -30,30 +30,43 @@ cp .env.example .env
 # Add your OpenAI API key to .env
 ```
 
-4. Place receipt images in the `imgs/` directory (supports .jpg files)
+4. Place receipt images in `imgs/` directory (supports .jpg files)
 
 ### Running
 
 ```bash
-python receipts.py
+python main.py
 ```
 
 ### Architecture
 
-The application uses LangChain/LangGraph with OOP design:
+The project is split into modular components:
 
-**Classes:**
-- **`ImageProcessor`** (ABC) - Abstract interface for image processing
-- **`OCRProcessor`** - OpenCV/Tesseract implementation
-- **`AIParser`** (ABC) - Abstract interface for AI parsing
-- **`ReceiptParser`** - OpenAI GPT-4o-mini implementation
-- **`WorkflowOrchestrator`** - Coordinates workflow with token tracking
-- **`ReceiptProcessor`** - Main facade class
+**Core Modules:**
+- **`models.py`** - Pydantic data models (Receipt, ReceiptItem)
+- **`api_response.py`** - Standardized API response structure
+- **`token_tracking.py`** - Token usage tracking utilities
+- **`image_processing.py`** - OCR and image preprocessing
+- **`ai_parsing.py`** - OpenAI receipt parsing with validation
+- **`workflow.py`** - LangGraph workflow orchestration
+- **`receipt_processor.py`** - Main processor facade
+- **`main.py`** - Entry point and CLI interface
+
+**Key Classes:**
+- **`ReceiptItem`** - Individual receipt items with validation
+- **`Receipt`** - Complete receipt with total validation
+- **`APIResponse`** - Standardized success/failure responses
+- **`TokenUsage`** - Tracks OpenAI API usage and costs
+- **`OCRProcessor`** - OpenCV/Tesseract image processing
+- **`ReceiptParser`** - OpenAI GPT-4o-mini with Pydantic validation
+- **`WorkflowOrchestrator`** - Coordinates processing workflow
+- **`ReceiptProcessor`** - Main facade interface
 
 **Processing Workflow:**
 1. **OCR Extraction**: Extract text from receipt images using Tesseract
 2. **AI Parsing**: Use OpenAI GPT-4o-mini to parse OCR text into structured JSON
-3. **Token Tracking**: Monitor OpenAI API usage and costs
+3. **Validation**: Validate parsed data with Pydantic models
+4. **Token Tracking**: Monitor OpenAI API usage and costs
 
 ### Token Usage
 
@@ -62,6 +75,15 @@ The application tracks OpenAI token usage and provides:
 - Request count
 - Session duration
 - Estimated cost (GPT-4o-mini pricing)
+- Success/failure statistics
+
+### Error Handling
+
+Uses structured error handling with:
+- **Pydantic validation** - Data integrity checks
+- **APIResponse pattern** - Consistent success/failure format
+- **Validation errors** - Detailed error information with raw data
+- **Graceful degradation** - Continues processing even with individual failures
 
 ### Dependencies
 
@@ -69,4 +91,5 @@ The application tracks OpenAI token usage and provides:
 - Tesseract for OCR
 - LangChain/LangGraph for workflow orchestration
 - OpenAI for receipt parsing
+- Pydantic for data validation
 - python-dotenv for environment management
