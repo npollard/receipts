@@ -17,8 +17,7 @@ class DecimalEncoder(json.JSONEncoder):
 
 class ReceiptItem(BaseModel):
     """Individual receipt item model"""
-    name: str
-    category: str
+    description: str
     price: Decimal
 
     @field_validator('price')

@@ -1,7 +1,7 @@
 """Main receipt processor class"""
 
 from image_processing import VisionProcessor
-from ai_parsing_with_persistence import ReceiptParser
+from ai_parsing import ReceiptParser
 from workflow import WorkflowOrchestrator
 from token_tracking import TokenUsage
 from api_response import APIResponse

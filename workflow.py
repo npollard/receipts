@@ -5,7 +5,7 @@ from typing import Dict, Any
 import json
 
 from image_processing import ImageProcessor
-from ai_parsing_with_persistence import ReceiptParser
+from ai_parsing import ReceiptParser
 from token_tracking import TokenUsage
 from api_response import APIResponse
 from langgraph.graph import StateGraph, START, END
