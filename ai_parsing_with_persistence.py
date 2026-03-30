@@ -99,7 +99,18 @@ CRITICAL RULES:
             return APIResponse.success(result)
 
         except ValidationError as e:
-            logger.warning(f"Validation failed: {e.errors()}")
+            # Log detailed validation errors
+            error_details = e.errors()
+            logger.error(f"Validation failed with {len(error_details)} errors:")
+            for i, error in enumerate(error_details, 1):
+                field = error.get('loc', ['unknown'])[0]
+                message = error.get('msg', 'unknown error')
+                error_type = error.get('type', 'unknown')
+                logger.error(f"  Error {i}: Field '{field}' - {message} (type: {error_type})")
+
+            # Log the problematic data for debugging
+            logger.debug(f"Problematic data: {json.dumps(parsed_data, indent=2, default=str)}")
+
             return self._handle_validation_error(e, parsed_data, input_tokens, output_tokens)
 
     def _convert_decimals_to_floats(self, data: dict) -> dict:
@@ -117,9 +128,22 @@ CRITICAL RULES:
     def _handle_validation_error(self, e: ValidationError, parsed_data: dict, input_tokens: int, output_tokens: int) -> APIResponse:
         """Handle Pydantic validation errors with proper serialization"""
         # Convert validation errors to JSON-serializable format using Pydantic v2 methods
+        error_details = e.errors()
+
+        # Create detailed error message
+        error_messages = []
+        for error in error_details:
+            field = error.get('loc', ['unknown'])[0]
+            message = error.get('msg', 'unknown error')
+            error_type = error.get('type', 'unknown')
+            error_messages.append(f"Field '{field}': {message} ({error_type})")
+
+        detailed_error_msg = f"Validation failed: {'; '.join(error_messages)}"
+
         validation_error = {
             "error": "validation_failed",
-            "details": e.errors(),  # Pydantic v2 errors are already JSON-serializable
+            "details": error_details,  # Pydantic v2 errors are already JSON-serializable
+            "error_messages": error_messages,
             "raw": parsed_data
         }
 
@@ -134,7 +158,7 @@ CRITICAL RULES:
         }
 
         # Return FAILURE for validation errors, not success
-        return APIResponse.failure(f"Validation failed: {len(e.errors())} errors found")
+        return APIResponse.failure(detailed_error_msg)
 
     def _create_fix_prompt(self, original_text: str, failed_response: dict) -> str:
         """Create a prompt to fix parsing errors"""

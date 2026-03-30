@@ -124,13 +124,6 @@ def print_results(result, successful_processes, failed_processes, image_files):
                 status = "✅ SUCCESS" if result.status == 'success' else "❌ FAILED"
                 logger.info(f"  {i}. {img_file.name}: {status}")
 
-    # Print final summary only once
-    if len(image_files) > 1:
-        logger.info("="*50)
-        logger.info("BATCH PROCESSING COMPLETE")
-        logger.info(f"✅ Successful: {successful_processes}")
-        logger.info(f"📊 Success Rate: {(successful_processes / len(image_files) * 100):.1f}%")
-
 
 def main():
     """Main entry point"""
