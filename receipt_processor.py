@@ -16,19 +16,6 @@ class ReceiptProcessor:
         self.ai_parser = ReceiptParser()
         self.orchestrator = WorkflowOrchestrator(self.image_processor, self.ai_parser)
 
-    def process_with_langgraph(self, image_path: str) -> Dict[str, Any]:
-        """Process using LangGraph workflow"""
-        app = self.orchestrator.create_langgraph_workflow()
-
-        initial_state = {
-            "messages": [],
-            "image_path": image_path,
-            "ocr_text": "",
-            "parsed_receipt": {},
-            "token_usage": self.orchestrator.token_usage
-        }
-
-        return app.invoke(initial_state)
 
     def process_directly(self, image_path: str) -> APIResponse:
         """Process directly without LangGraph"""
