@@ -2,13 +2,13 @@
 
 Leverage AI to take images of receipts and tell me where all my grocery money is going.
 
-## LangChain/LangGraph Setup with Modular Architecture
+## LangChain Setup with Modular Architecture
 
-This project uses LangChain/LangGraph for workflow management with modular OOP architecture.
+This project uses LangChain for AI receipt parsing with a clean, modular architecture following DRY principles.
 
 ### Prerequisites
 
-- Python 2.7.4+
+- Python 3.8+
 - OpenAI API key
 - Tesseract OCR
 
@@ -22,13 +22,16 @@ The project is split into modular components:
 - **`token_tracking.py`** - Token usage tracking utilities
 - **`token_usage_persistence.py`** - Long-term token usage storage
 - **`image_processing.py`** - OpenAI Vision API integration
-- **`ai_parsing_with_persistence.py`** - AI parsing with persistence
+- **`receipt_parser.py`** - Core AI parsing logic
+- **`validation_utils.py`** - Validation and error handling
+- **`token_utils.py`** - Token extraction utilities
+- **`ai_parsing.py`** - Clean re-export of parsing functionality
 - **`workflow.py`** - LangGraph workflow orchestration
 - **`receipt_processor.py`** - Main processor facade
 - **`main.py`** - CLI interface and entry point
 
 **Key Classes:**
-- **`ReceiptItem`** - Individual receipt items with validation
+- **`ReceiptItem`** - Individual receipt items with description and price
 - **`Receipt`** - Complete receipt with total validation
 - **`VisionProcessor`** - Direct image-to-text processing
 - **`ReceiptParser`** - AI parsing with retry and error fixing
@@ -46,8 +49,7 @@ cd receipts
 pip install -r requirements.txt
 
 # Set up environment
-cp .env.example .env
-# Add your OpenAI API key to .env
+export OPENAI_API_KEY="your-openai-api-key-here"
 
 # Create directories
 mkdir -p imgs
@@ -103,18 +105,34 @@ The system automatically tracks:
 - **Fallback mechanisms** - Graceful degradation when parsing fails
 - **Comprehensive logging** - Detailed debugging information
 
+## Architecture Highlights
+
+### DRY Principles
+- **Single source of truth** - No duplicate parsing logic
+- **Modular design** - Each module has clear responsibility
+- **Reusable components** - Utils can be used across modules
+- **Easy maintenance** - Changes localized to specific modules
+
+### Data Flow
+```
+Images → VisionProcessor → OCR Text → ReceiptParser → Validation → Token Tracking → Storage
+```
+
 ## Development
 
-### Adding New Processing Modes
+### Adding New Features
 
 ```python
-# Add new mode to workflow.py
-def process_image_with_new_mode(image_path: str) -> APIResponse:
-    # Your new processing logic here
+# Add new validation logic to validation_utils.py
+def custom_validation(data: dict) -> APIResponse:
+    # Your validation logic here
     pass
 
-# Update main.py to include new mode
-parser.add_argument('--mode', choices=['chain', 'new_mode'], default='chain')
+# Extend token tracking in token_tracking.py
+class CustomTokenUsage(TokenUsage):
+    def custom_method(self):
+        # Custom tracking logic
+        pass
 ```
 
 ### Extending Token Usage
@@ -133,3 +151,12 @@ persistence = TokenUsagePersistence("custom_storage.json")
 - **🎯 High accuracy** - GPT-4o-mini understands receipt context
 - **💰 Cost effective** - Only pay for successful parsing operations
 - **📈 Scalable** - Modular architecture supports easy extension
+- **🔧 Maintainable** - Clean separation of concerns and DRY principles
+
+## Recent Improvements
+
+- **✅ Eliminated duplicate code** - Removed duplicate ai_parsing files
+- **✅ Modular architecture** - Split into focused, single-responsibility modules
+- **✅ Fixed validation issues** - Corrected Pydantic model field matching
+- **✅ Improved error handling** - Better JSON serialization and fallbacks
+- **✅ Enhanced logging** - Clear debugging and progress tracking
