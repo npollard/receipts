@@ -58,24 +58,11 @@ mkdir -p imgs
 ### Basic Usage
 
 ```bash
-# Process a single image
-python main.py --mode direct imgs/receipt.jpg
+# Process all images in imgs directory (shows persisted usage summary after processing)
+python main.py
 
-# Process with LangGraph workflow
-python main.py --mode langgraph imgs/receipt.jpg
-
-# Process with LangChain chains
-python main.py --mode chain imgs/receipt.jpg
-```
-
-### Token Usage Management
-
-```bash
-# View token usage summary
-python main.py --usage-summary
-
-# Clear old sessions (keep last 50)
-python main.py --clear-sessions --keep-last 50
+# Show only persisted token usage summary without processing
+python main.py --usage-summary-only
 ```
 
 ### Environment Setup
@@ -87,11 +74,13 @@ export OPENAI_API_KEY="your-openai-api-key-here"
 
 ## Configuration
 
-The system supports multiple processing modes:
+The system uses LangChain-based processing with sequential OOP components and supports batch processing of all images in the `imgs/` directory.
 
-- **Direct Mode**: Simple image → OCR → AI parsing
-- **LangGraph Mode**: Workflow-based processing with state management
-- **Chain Mode**: LangChain sequential processing
+### Batch Processing Features:
+- **Automatic discovery** - Finds all .jpg, .jpeg, .png files in imgs/
+- **Sequential processing** - Processes each image individually
+- **Success tracking** - Reports success/failure rates
+- **Token aggregation** - Tracks usage across all processed images
 
 ## Token Usage & Cost Tracking
 
@@ -125,7 +114,7 @@ def process_image_with_new_mode(image_path: str) -> APIResponse:
     pass
 
 # Update main.py to include new mode
-parser.add_argument('--mode', choices=['direct', 'langgraph', 'chain', 'new_mode'], default='direct')
+parser.add_argument('--mode', choices=['chain', 'new_mode'], default='chain')
 ```
 
 ### Extending Token Usage

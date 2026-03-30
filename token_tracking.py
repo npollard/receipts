@@ -25,9 +25,9 @@ class TokenUsage:
 
     def get_estimated_cost(self) -> float:
         """Estimate cost based on token usage"""
-        # GPT-4o-mini pricing (approximate)
-        input_cost_per_1k = 0.00015  # $0.15 per 1M input tokens
-        output_cost_per_1k = 0.0006   # $0.60 per 1M output tokens
+        # GPT-4o-mini pricing (current as of 2024)
+        input_cost_per_1k = 0.15  # $0.15 per 1K input tokens
+        output_cost_per_1k = 0.60  # $0.60 per 1K output tokens
 
         input_cost = (self.input_tokens / 1000) * input_cost_per_1k
         output_cost = (self.output_tokens / 1000) * output_cost_per_1k
