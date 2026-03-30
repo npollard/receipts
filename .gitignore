@@ -3,3 +3,4 @@ npollard-venv
 imgs/*
 .env
 __pycache__
+token_usage.json
