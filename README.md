@@ -39,15 +39,16 @@ Place receipt images (.jpg, .jpeg, .png) in the `imgs/` directory and run the pr
 ## Data Flow & Orchestration
 
 ```
-Images → Vision API (OCR) → AI Parser → Validation → Storage
+Images → Vision API (OCR) → OCR Text Validation → AI Parser → Validation → Retry Logic → Storage
 ```
 
 **Processing Pipeline:**
 1. **Image Processing** - OpenAI Vision API extracts text from receipt images
-2. **AI Parsing** - GPT-4o-mini structures OCR text into JSON format
-3. **Validation** - Pydantic models validate receipt structure and data types
-4. **Retry Logic** - Up to 3 attempts with AI error-fixing for failed parses
-5. **Token Tracking** - Monitors API usage and costs across all operations
+2. **OCR Text Validation** - Validates extracted text quality and content
+3. **AI Parsing** - GPT-4o-mini structures OCR text into JSON format
+4. **Validation** - Pydantic models validate receipt structure and data types
+5. **Retry Logic** - Up to 3 attempts with AI error-fixing for failed parses
+6. **Token Tracking** - Monitors API usage and costs across all operations
 
 **Error Recovery:**
 - Automatic retries with targeted error-fixing prompts
