@@ -143,3 +143,10 @@ Successfully parsed receipts include:
 - Date, total amount, and itemized list
 - Token usage statistics
 - Processing status and any error details
+
+## TODO
+- [ ] Implement database persistence for processed receipts
+- [ ] Experiment with a local OCR model for cost reduction
+- [ ] Create mobile app for uploading receipts
+- [ ] Create identity management for users
+- [ ] Architect for scalability and performance
