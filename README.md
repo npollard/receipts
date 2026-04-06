@@ -1,6 +1,7 @@
 # Receipts
-
 AI-powered receipt processing to track grocery spending.
+
+Exploring production-grade LLM workflows with validation, retries, persistence, and cost tracking.
 
 ## Prerequisites
 
