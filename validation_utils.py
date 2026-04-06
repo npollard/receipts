@@ -37,7 +37,10 @@ def validate_response_content(response) -> APIResponse:
         return APIResponse.failure(f"Failed to parse JSON: {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected error parsing response: {str(e)}")
-        return APIResponse.failure(f"Unexpected parsing error: {str(e)}")
+        if "JSONDecodeError" in str(e):
+            return APIResponse.failure(f"Failed to parse JSON: {str(e)}")
+        else:
+            return APIResponse.failure(f"Unexpected parsing error: {str(e)}")
 
 
 def validate_with_pydantic(parsed_data: dict, input_tokens: int, output_tokens: int) -> APIResponse:
@@ -64,7 +67,8 @@ def validate_with_pydantic(parsed_data: dict, input_tokens: int, output_tokens: 
         error_details = e.errors()
         logger.error(f"Validation failed with {len(error_details)} errors:")
         for i, error in enumerate(error_details, 1):
-            field = error.get('loc', ['unknown'])[0]
+            loc = error.get('loc', ['unknown'])
+            field = loc[0] if isinstance(loc, (list, tuple)) and len(loc) > 0 else (str(loc) if loc else 'unknown')
             message = error.get('msg', 'unknown error')
             error_type = error.get('type', 'unknown')
             logger.error(f"  Error {i}: Field '{field}' - {message} (type: {error_type})")
@@ -83,7 +87,8 @@ def handle_validation_error(e: ValidationError, parsed_data: dict, input_tokens:
     # Create detailed error message
     error_messages = []
     for error in error_details:
-        field = error.get('loc', ['unknown'])[0]
+        loc = error.get('loc', ['unknown'])
+        field = loc[0] if isinstance(loc, (list, tuple)) and len(loc) > 0 else (str(loc) if loc else 'unknown')
         message = error.get('msg', 'unknown error')
         error_type = error.get('type', 'unknown')
         error_messages.append(f"Field '{field}': {message} ({error_type})")
@@ -94,11 +99,12 @@ def handle_validation_error(e: ValidationError, parsed_data: dict, input_tokens:
         "error": "validation_failed",
         "details": error_details,  # Pydantic v2 errors are already JSON-serializable
         "error_messages": error_messages,
-        "raw": parsed_data
+        "raw": parsed_data or {}
     }
 
     # Convert Decimal objects in raw data to floats for JSON serialization
-    parsed_data = _convert_decimals_to_floats(parsed_data)
+    if parsed_data:
+        parsed_data = _convert_decimals_to_floats(parsed_data)
 
     # Add token usage to validation error
     validation_error["_token_usage"] = {

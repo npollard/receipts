@@ -9,19 +9,34 @@ AI-powered receipt processing to track grocery spending.
 
 ## Installation
 
+> Use a project virtual environment to avoid conflicts with globally installed LangChain packages.
+
 ```bash
 # Clone the repository
 git clone <repository-url>
 cd receipts
 
+# Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
 # Install dependencies
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 
 # Set up environment
 export OPENAI_API_KEY="your-openai-api-key-here"
 
 # Create directory for receipt images
 mkdir -p imgs
+```
+
+### VS Code
+
+If you're using VS Code, select the workspace interpreter or let the included settings pick:
+
+```bash
+/Users/nelson/Development/receipts/.venv/bin/python
 ```
 
 ## Usage
@@ -35,6 +50,65 @@ python main.py --usage-summary-only
 ```
 
 Place receipt images (.jpg, .jpeg, .png) in the `imgs/` directory and run the processor.
+
+## Testing
+
+### Integration Tests
+
+Run the integration tests with:
+
+```bash
+python3 -m pytest -q tests/test_integration_receipt_processing.py
+```
+
+Current integration coverage includes:
+- Deterministic OCR stubs
+- Deterministic LLM parsing stubs
+- Mocked token usage validation
+- Success and failure batch-processing scenarios
+
+### Unit Tests
+
+Run all unit tests with:
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+Run specific test modules:
+
+```bash
+# Test API response handling
+python3 -m pytest tests/test_api_response.py -v
+
+# Test token usage tracking
+python3 -m pytest tests/test_token_tracking.py -v
+
+# Test data models
+python3 -m pytest tests/test_models.py -v
+
+# Test image processing
+python3 -m pytest tests/test_image_processing.py -v
+
+# Test receipt parsing
+python3 -m pytest tests/test_receipt_parser.py -v
+
+# Test workflow orchestration
+python3 -m pytest tests/test_workflow.py -v
+
+# Test validation utilities
+python3 -m pytest tests/test_validation_utils.py -v
+
+# Test receipt processor
+python3 -m pytest tests/test_receipt_processor.py -v
+```
+
+Unit tests provide comprehensive coverage of:
+- Individual component functionality
+- Error handling and edge cases
+- Data validation and model constraints
+- Token usage tracking and cost estimation
+- OCR and AI parsing logic with mocked dependencies
 
 ## Data Flow & Orchestration
 

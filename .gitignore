@@ -4,3 +4,5 @@ imgs/*
 .env
 __pycache__
 token_usage.json
+.DS_Store
+.vscode/
