@@ -2,12 +2,14 @@
 
 import logging
 import argparse
+import os
 from pathlib import Path
 from typing import List, Dict, Any
 from receipt_processor import ReceiptProcessor
 from ai_parsing import ReceiptParser
 from token_usage_persistence import TokenUsagePersistence
 from token_tracking import TokenUsage
+from database_models import DatabaseManager
 from langchain_core.runnables import RunnableLambda
 import json
 from api_response import APIResponse
@@ -132,9 +134,8 @@ def save_token_usage_to_persistence(token_usage: TokenUsage):
         logger.info(f"Saved batch token usage to persistent storage: {session_id}")
 
 
-def process_batch_images(image_files: List[Path]) -> tuple[int, int, TokenUsage]:
+def process_batch_images(image_files: List[Path], processor: ReceiptProcessor) -> tuple[int, int, TokenUsage]:
     """Process multiple images and return success/failure counts and token usage"""
-    processor = ReceiptProcessor()
     successful_processes = 0
     failed_processes = 0
     total_token_usage = TokenUsage()
@@ -185,6 +186,10 @@ def main():
     parser = argparse.ArgumentParser(description='Process receipt images using AI')
     parser.add_argument('--usage-summary-only', action='store_true',
                        help='Show only persisted token usage summary without processing images')
+    parser.add_argument('--user-email', type=str, default=None,
+                       help='Specify user email for multi-user mode')
+    parser.add_argument('--no-db', action='store_true',
+                       help='Run without database persistence (backward compatibility)')
 
     args = parser.parse_args()
 
@@ -192,6 +197,24 @@ def main():
     if args.usage_summary_only:
         print_usage_summary(show_persisted=False)
         return
+
+    # Initialize database unless explicitly disabled
+    db_manager = None
+    if not args.no_db:
+        DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///receipts.db")
+        db_manager = DatabaseManager(DATABASE_URL)
+        db_manager.create_tables()
+
+    # Initialize processor with database support
+    processor = ReceiptProcessor(db_manager=db_manager)
+
+    # Set user if specified
+    if args.user_email and db_manager:
+        user = processor.switch_user(args.user_email)
+        logger.info(f"Processing as user: {user.email} ({user.id})")
+    elif db_manager:
+        user_context = processor.get_user_context()
+        logger.info(f"Processing as default user: {user_context['email']} ({user_context['user_id']})")
 
     # Process all images in imgs directory
     imgs_dir = Path('imgs')
@@ -201,7 +224,7 @@ def main():
         return
 
     # Process batch
-    successful, failed, token_usage = process_batch_images(image_files)
+    successful, failed, token_usage = process_batch_images(image_files, processor)
 
     # Print batch summary
     print_batch_summary(successful, failed, len(image_files))
