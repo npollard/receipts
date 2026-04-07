@@ -9,7 +9,7 @@ from typing import Dict, Any, List
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from schema.database_initializer import CleanDatabaseInitializer
+from infrastructure.database.init_db import CleanDatabaseInitializer
 from config import DATABASE_URL, DATABASE_PATH
 
 logger = logging.getLogger(__name__)
