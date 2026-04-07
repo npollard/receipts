@@ -14,7 +14,6 @@ from models.receipt import Receipt
 from api_response import APIResponse
 from token_usage_persistence import TokenUsagePersistence
 from tracking import TokenUsage, extract_token_usage
-from domain.validation.validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
 from domain.validation.validation_service import ValidationService
 from services.retry_service import RetryService, RetryStrategy
 
@@ -38,7 +37,7 @@ class ReceiptParser:
             strategy=RetryStrategy.EXPONENTIAL_BACKOFF,
             base_delay=0.5
         )
-        
+
         self._system_prompt = """
 You are a receipt parser that returns ONLY valid JSON.
 
@@ -126,7 +125,7 @@ Remember: Return ONLY: JSON object, nothing else.
         """Parse with retry logic and error fixing"""
         if token_usage is None:
             token_usage = self.token_usage
-            
+
         def parse_attempt(*args, **kwargs):
             return self.parse_text(text)
 
@@ -145,7 +144,7 @@ Remember: Return ONLY: JSON object, nothing else.
         """Parse text with token usage tracking"""
         if token_usage is None:
             token_usage = self.token_usage
-            
+
         result = self.parse_with_retry(text, token_usage)
 
         # Save token usage if successful

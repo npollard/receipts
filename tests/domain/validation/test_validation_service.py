@@ -1,7 +1,7 @@
 """Unit tests for validation utilities"""
 
 import pytest
-from validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
+from domain.validation.validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
 from api_response import APIResponse
 from models.receipt import Receipt, ReceiptItem
 from pydantic import ValidationError

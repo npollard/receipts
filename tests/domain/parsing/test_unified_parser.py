@@ -6,7 +6,7 @@ import os
 # Add the project root to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from receipt_parser import ReceiptParser
+from domain.parsing.receipt_parser import ReceiptParser
 from api_response import APIResponse
 from tracking import TokenUsage
 
