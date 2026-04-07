@@ -987,7 +987,7 @@ class OCRService:
 
         return min(confidence, 1.0)
 
-    def score_ocr_quality(self, text: str) -> float:
+    def score_ocr_quality(self, text: str, detailed: bool = False, debug: bool = False) -> float:
         """
         Score OCR output quality using deterministic logic and regex patterns.
 
@@ -998,38 +998,119 @@ class OCRService:
         - Ratio of valid words vs noisy tokens (0-25 points)
         - Penalty for excessive symbols/noise (0-10 points)
 
+        Args:
+            text: OCR text to evaluate
+            detailed: If True, return dict with component scores instead of just total score
+            debug: If True, print detailed scoring breakdown
+
         Returns:
-            float: Quality score between 0.0 and 1.0
+            float: Quality score between 0.0 and 1.0 (if detailed=False)
+            dict: Detailed scoring breakdown (if detailed=True)
         """
         if not text or not text.strip():
+            if detailed:
+                return {
+                    'total_score': 0.0,
+                    'component_scores': {
+                        'text_length': 0.0,
+                        'price_patterns': 0.0,
+                        'total_keyword': 0.0,
+                        'word_quality': 0.0,
+                        'noise_penalty': 0.0
+                    },
+                    'raw_scores': {
+                        'text_length_points': 0.0,
+                        'price_patterns_points': 0.0,
+                        'total_keyword_points': 0.0,
+                        'word_quality_points': 0.0,
+                        'noise_penalty_points': 0.0
+                    },
+                    'max_scores': {
+                        'text_length': 20.0,
+                        'price_patterns': 25.0,
+                        'total_keyword': 20.0,
+                        'word_quality': 25.0,
+                        'noise_penalty': 10.0
+                    }
+                }
             return 0.0
 
-        score = 0.0
-
-        # 1. Text Length Scoring (0-20 points)
+        # Calculate component scores
         length_score = self._score_text_length(text)
-        score += length_score
-
-        # 2. Price Pattern Detection (0-25 points)
         price_score = self._score_price_patterns(text)
-        score += price_score
-
-        # 3. TOTAL Keyword Detection (0-20 points)
         total_score = self._score_total_keyword(text)
-        score += total_score
-
-        # 4. Valid Word vs Noise Ratio (0-25 points)
         word_quality_score = self._score_word_quality(text)
-        score += word_quality_score
-
-        # 5. Symbol/Noise Penalty (0-10 points deduction)
         noise_penalty = self._calculate_noise_penalty(text)
-        score -= noise_penalty
 
-        # Ensure score is within bounds [0.0, 1.0]
-        final_score = max(0.0, min(1.0, score))
+        # Calculate total score
+        raw_total = length_score + price_score + total_score + word_quality_score - noise_penalty
+        final_score = max(0.0, min(1.0, raw_total / 100.0))  # Normalize to 0-1
+
+        # Debug output
+        if debug:
+            self._print_scoring_debug(
+                text, length_score, price_score, total_score,
+                word_quality_score, noise_penalty, final_score
+            )
+
+        # Return detailed breakdown if requested
+        if detailed:
+            return {
+                'total_score': final_score,
+                'component_scores': {
+                    'text_length': length_score / 20.0,      # Normalized to 0-1
+                    'price_patterns': price_score / 25.0,   # Normalized to 0-1
+                    'total_keyword': total_score / 20.0,    # Normalized to 0-1
+                    'word_quality': word_quality_score / 25.0,  # Normalized to 0-1
+                    'noise_penalty': noise_penalty / 10.0   # Normalized to 0-1
+                },
+                'raw_scores': {
+                    'text_length_points': length_score,
+                    'price_patterns_points': price_score,
+                    'total_keyword_points': total_score,
+                    'word_quality_points': word_quality_score,
+                    'noise_penalty_points': noise_penalty
+                },
+                'max_scores': {
+                    'text_length': 20.0,
+                    'price_patterns': 25.0,
+                    'total_keyword': 20.0,
+                    'word_quality': 25.0,
+                    'noise_penalty': 10.0
+                },
+                'text_stats': {
+                    'length': len(text),
+                    'word_count': len(text.split()),
+                    'line_count': len(text.split('\n'))
+                }
+            }
 
         return final_score
+
+    def _print_scoring_debug(self, text: str, length_score: float, price_score: float,
+                           total_score: float, word_quality_score: float,
+                           noise_penalty: float, final_score: float):
+        """Print detailed scoring breakdown for debugging"""
+        print(f"\n{'='*50}")
+        print(f"OCR QUALITY SCORING BREAKDOWN")
+        print(f"{'='*50}")
+        print(f"Text Length: {len(text)} characters")
+        print(f"Word Count: {len(text.split())} words")
+        print(f"Line Count: {len(text.split('\n'))} lines")
+        print(f"Text Preview: {text[:100]}{'...' if len(text) > 100 else ''}")
+
+        print(f"\n--- COMPONENT SCORES ---")
+        print(f"Text Length: {length_score:.1f}/20.0 ({length_score/20.0*100:.1f}%)")
+        print(f"Price Patterns: {price_score:.1f}/25.0 ({price_score/25.0*100:.1f}%)")
+        print(f"Total Keywords: {total_score:.1f}/20.0 ({total_score/20.0*100:.1f}%)")
+        print(f"Word Quality: {word_quality_score:.1f}/25.0 ({word_quality_score/25.0*100:.1f}%)")
+        print(f"Noise Penalty: -{noise_penalty:.1f}/10.0 ({noise_penalty/10.0*100:.1f}%)")
+
+        raw_total = length_score + price_score + total_score + word_quality_score - noise_penalty
+        print(f"\n--- TOTAL SCORE ---")
+        print(f"Raw Total: {raw_total:.1f}/100.0")
+        print(f"Final Score: {final_score:.3f} ({final_score*100:.1f}%)")
+        print(f"{'='*50}\n")
 
     def _score_text_length(self, text: str) -> float:
         """
