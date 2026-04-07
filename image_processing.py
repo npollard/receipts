@@ -24,11 +24,11 @@ class ImageProcessor(ABC):
 
 
 class VisionProcessor(ImageProcessor):
-    """Concrete implementation of image processing using OCR Service"""
+    """Concrete implementation of image processing using EasyOCR Service"""
 
-    def __init__(self, model_name: str = "gpt-4o-mini"):
-        self.ocr_service = OCRService(model_name)
-        logger.info(f"Initialized VisionProcessor with model: {model_name}")
+    def __init__(self, use_gpu: bool = False, lang: list = ['en'], confidence_threshold: float = 0.7):
+        self.ocr_service = OCRService(use_gpu=use_gpu, lang=lang, confidence_threshold=confidence_threshold)
+        logger.info(f"Initialized VisionProcessor with EasyOCR (GPU: {use_gpu}, Lang: {lang}, Confidence: {confidence_threshold})")
 
     def preprocess(self, image_path: str) -> Any:
         """Public interface for preprocessing"""

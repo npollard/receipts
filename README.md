@@ -150,3 +150,4 @@ Successfully parsed receipts include:
 - [ ] Create mobile app for uploading receipts
 - [ ] Create identity management for users
 - [ ] Architect for scalability and performance
+- [ ] Add REST API for BI on receipt data
