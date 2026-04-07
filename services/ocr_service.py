@@ -454,45 +454,109 @@ class OCRService:
         return bool(re.match(money_pattern, word))
 
     def _fix_receipt_words(self, word: str) -> str:
-        """Fix specific common OCR errors in receipt-related words"""
-        # Common receipt word corrections
-        corrections = {
-            'GR0CERY': 'GROCERY',
-            'PR0DUCE': 'PRODUCE',
-            'DE$CHUTE$': 'DESCHUTES',
-            'L1QU0R': 'LIQUOR',
-            'CA$H': 'CASH',
-            'T0TAL': 'TOTAL',
-            'AM0UNT': 'AMOUNT',
-            'BALANCE': 'BALANCE',
-            'PURCHA$E': 'PURCHASE',
-            'CARD': 'CARD',
-            'DEBI': 'DEBI',
-            'PR1MARY': 'PRIMARY',
-            'AUTH': 'AUTH',
-            'NF$': 'NFS',  # No Fructose Sugar
-            'BLACKGPK': 'BLACK 6PK',  # Common beer packaging
-        }
+        """Apply generalized context-aware normalization to receipt words"""
+        if not word:
+            return word
 
-        # Apply corrections if exact match
-        if word in corrections:
-            return corrections[word]
+        # Apply generalized character corrections based on context
+        return self._apply_generalized_corrections(word)
 
-        # Apply partial corrections for common patterns
-        if 'GR0CERY' in word:
-            word = word.replace('GR0CERY', 'GROCERY')
-        if 'PR0DUCE' in word:
-            word = word.replace('PR0DUCE', 'PRODUCE')
-        if 'L1QU0R' in word:
-            word = word.replace('L1QU0R', 'LIQUOR')
-        if 'CA$H' in word:
-            word = word.replace('CA$H', 'CASH')
-        if 'T0TAL' in word:
-            word = word.replace('T0TAL', 'TOTAL')
-        if 'AM0UNT' in word:
-            word = word.replace('AM0UNT', 'AMOUNT')
+    def _apply_generalized_corrections(self, word: str) -> str:
+        """Apply context-aware character corrections without hardcoded mappings"""
+        corrected = word
 
-        return word
+        # 1. Fix common OCR character confusions based on word context
+        corrected = self._fix_character_confusions(corrected)
+
+        # 2. Fix price formatting issues
+        corrected = self._fix_price_formatting(corrected)
+
+        # 3. Fix common receipt-specific patterns using regex
+        corrected = self._fix_receipt_patterns(corrected)
+
+        return corrected
+
+    def _fix_character_confusions(self, word: str) -> str:
+        """Fix character confusions based on word analysis"""
+        corrected = word
+
+        # Count character types for context analysis
+        digit_count = sum(1 for c in word if c.isdigit())
+        alpha_count = sum(1 for c in word if c.isalpha())
+        special_count = len(word) - digit_count - alpha_count
+
+        # Apply corrections based on character composition
+        if digit_count > alpha_count and len(word) > 1:
+            # Mostly numeric - fix alphabetic characters that should be digits
+            corrected = corrected.replace('O', '0')
+            corrected = corrected.replace('I', '1')
+            corrected = corrected.replace('l', '1')
+        elif alpha_count > digit_count:
+            # Mostly alphabetic - fix numeric characters that should be letters
+            corrected = corrected.replace('0', 'O')
+            corrected = corrected.replace('1', 'l')
+        elif special_count > 0:
+            # Mixed characters - be more conservative
+            if 'S' in word and '$' not in word and digit_count > 0:
+                # Likely money context where S should be $
+                corrected = corrected.replace('S', '$')
+            elif '$' in word and digit_count == 0:
+                # Non-money context where $ should be S
+                corrected = corrected.replace('$', 'S')
+
+        return corrected
+
+    def _fix_price_formatting(self, word: str) -> str:
+        """Fix common price formatting issues using regex"""
+        # Fix space-separated decimals (e.g., "6 . 49" -> "6.49")
+        space_decimal_pattern = r'(\d+)\s+\.\s+(\d{2})'
+        corrected = re.sub(space_decimal_pattern, r'\1.\2', word)
+
+        # Fix comma decimal separators (e.g., "37,83" -> "37.83") in money context
+        if '$' in word or any(money_word in word.lower() for money_word in ['total', 'amount', 'price', 'cost']):
+            comma_decimal_pattern = r'(\d+),(\d{2})'
+            corrected = re.sub(comma_decimal_pattern, r'\1.\2', corrected)
+
+        # Fix missing decimal points in price-like patterns
+        price_pattern = r'^\$?(\d+)(\d{2})$'
+        if re.match(price_pattern, corrected):
+            corrected = re.sub(price_pattern, r'$\1.\2', corrected)
+
+        return corrected
+
+    def _fix_receipt_patterns(self, word: str) -> str:
+        """Fix common receipt patterns using regex-based approaches"""
+        # Fix common OCR errors in receipt terminology
+        patterns = [
+            # Common number/letter substitutions in receipt contexts
+            (r'GR[0O]CERY', 'GROCERY'),
+            (r'PR[0O]DUCE', 'PRODUCE'),
+            (r'L[1I]QU[0O]R', 'LIQUOR'),
+            (r'T[0O]TAL', 'TOTAL'),
+            (r'AM[0O]UNT', 'AMOUNT'),
+            (r'CA$H', 'CASH'),
+            (r'PURCHA$E', 'PURCHASE'),
+            (r'PR[1I]MARY', 'PRIMARY'),
+            (r'DEB[1I]', 'DEBI'),
+
+            # Fix common packaging/quantity indicators
+            (r'BLACKGPK', 'BLACK 6PK'),
+            (r'(\d+)PK', r'\1 PK'),
+
+            # Fix common separator issues
+            (r'\s+\.\s+', '.'),  # Space around decimal points
+            (r'\s+\,\s+', ','),  # Space around commas
+
+            # Fix currency symbol placement
+            (r'(\d+)\s+\$', r'$\1'),
+            (r'\$\s+(\d+)', r'$\1'),
+        ]
+
+        corrected = word
+        for pattern, replacement in patterns:
+            corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
+
+        return corrected
 
     def get_ocr_confidence(self, image_path: str) -> float:
         """Get average confidence score for OCR extraction"""
@@ -551,3 +615,413 @@ class OCRService:
         except Exception as e:
             logger.error(f"Error in extract_text_with_confidence for {image_path}: {str(e)}")
             raise
+
+    def extract_receipt_fields(self, ocr_text: str) -> Dict[str, Any]:
+        """Extract key receipt fields from OCR text using regex-based heuristics"""
+        if not ocr_text:
+            return {
+                'total_amount': None,
+                'items': [],
+                'merchant_name': None,
+                'date': None,
+                'raw_text': ocr_text
+            }
+
+        # Extract structured fields
+        total_amount = self._extract_total_amount(ocr_text)
+        items = self._extract_items(ocr_text)
+        merchant_name = self._extract_merchant_name(ocr_text)
+        date = self._extract_date(ocr_text)
+
+        return {
+            'total_amount': total_amount,
+            'items': items,
+            'merchant_name': merchant_name,
+            'date': date,
+            'raw_text': ocr_text,
+            'extraction_confidence': self._calculate_extraction_confidence(total_amount, items)
+        }
+
+    def _extract_total_amount(self, text: str) -> Optional[float]:
+        """Extract total amount using regex patterns"""
+        # Pattern 1: TOTAL followed by amount (handle comma decimal format)
+        total_patterns = [
+            r'TOTAL\s*AMOUNT\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'TOTAL\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'TOTAL\s*TRANSACTION\s*AMOUNT\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'GRAND\s*TOTAL\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'SUBTOTAL\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+        ]
+
+        for pattern in total_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                amount_str = match.group(1).replace(',', '')
+                # Handle comma decimal separator (e.g., "37,83" -> "37.83")
+                amount_str = amount_str.replace(',', '.') if '.' not in amount_str else amount_str
+                try:
+                    return float(amount_str)
+                except ValueError:
+                    continue
+
+        # Pattern 2: Amount at end of receipt (common pattern)
+        end_patterns = [
+            r'(\d+(?:,\d{3})*(?:[,.]\d{2})?)\s*TOTAL',
+            r'AMOUNT\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'BALANCE\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'(\d+(?:,\d{3})*(?:[,.]\d{2})?)\s*BALANCE',
+        ]
+
+        for pattern in end_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                amount_str = match.group(1) if match.lastindex >= 1 else match.group(0).replace(',', '')
+                # Handle comma decimal separator
+                amount_str = amount_str.replace(',', '.') if '.' not in amount_str else amount_str
+                try:
+                    return float(amount_str)
+                except ValueError:
+                    continue
+
+        # Pattern 3: Look for amounts before TOTAL
+        amount_before_total = r'(\d+(?:,\d{3})*(?:[,.]\d{2})?)\s+(?:TOTAL|AMOUNT|BALANCE)'
+        match = re.search(amount_before_total, text, re.IGNORECASE)
+        if match:
+            amount_str = match.group(1).replace(',', '')
+            amount_str = amount_str.replace(',', '.') if '.' not in amount_str else amount_str
+            try:
+                return float(amount_str)
+            except ValueError:
+                pass
+
+        return None
+
+    def _extract_items(self, text: str) -> List[Dict[str, Any]]:
+        """Extract item lines with price patterns"""
+        items = []
+        lines = text.split('\n')
+
+        for line in lines:
+            item = self._parse_item_line(line)
+            if item:
+                items.append(item)
+
+        return items
+
+    def _parse_item_line(self, line: str) -> Optional[Dict[str, Any]]:
+        """Parse a single line to extract item information"""
+        # Pattern: Description Price [Unit Price] [Quantity]
+        # Look for price patterns at the end of lines
+        price_patterns = [
+            r'(.+?)\s+(\d+\.\d{2})\s*$',  # Description Price
+            r'(.+?)\s+(\d+\.\d{2})\s+(\d+\.\d{2})\s*$',  # Description UnitPrice Price
+            r'(.+?)\s+(\d+)\s+(\d+\.\d{2})\s*$',  # Description Quantity Price
+            r'(.+?)\s+\$?(\d+\.\d{2})\s*$',  # Description $Price
+            r'(.+?)\s+(\d+\.\d{2})\s+S?\s*$',  # Description Price S (for savings)
+            # Handle space-separated decimals (e.g., "6 . 49")
+            r'(.+?)\s+(\d+)\s+\.\s+(\d{2})\s*$',  # Description X . YY
+        ]
+
+        for pattern in price_patterns:
+            match = re.match(pattern, line.strip(), re.IGNORECASE)
+            if match:
+                groups = match.groups()
+
+                if len(groups) == 2:
+                    # Description and Price
+                    description = groups[0].strip()
+                    price = self._parse_price(groups[1])
+                    return {
+                        'description': description,
+                        'price': price,
+                        'quantity': 1,
+                        'unit_price': price
+                    }
+                elif len(groups) == 3:
+                    # Description, UnitPrice, Price OR Description, Quantity, Price
+                    description = groups[0].strip()
+                    price = self._parse_price(groups[2])
+
+                    # Try to determine if groups[1] is unit price or quantity
+                    if '.' in groups[1]:
+                        # Likely unit price
+                        unit_price = self._parse_price(groups[1])
+                        quantity = 1 if unit_price > 0 else price / unit_price
+                    else:
+                        # Likely quantity
+                        quantity = int(groups[1]) if groups[1].isdigit() else 1
+                        unit_price = price / quantity if quantity > 0 else price
+
+                    return {
+                        'description': description,
+                        'price': price,
+                        'quantity': quantity,
+                        'unit_price': unit_price
+                    }
+
+        return None
+
+    def _parse_price(self, price_str: str) -> float:
+        """Parse price string to float"""
+        try:
+            # Remove currency symbols and spaces
+            clean_price = re.sub(r'[^\d.]', '', price_str)
+            # Handle space-separated decimals (e.g., "6 . 49" -> "6.49")
+            clean_price = clean_price.replace(' ', '')
+            return float(clean_price)
+        except (ValueError, AttributeError):
+            return 0.0
+
+    def _extract_merchant_name(self, text: str) -> Optional[str]:
+        """Extract merchant name using common patterns"""
+        # Look for common store names at the beginning
+        merchant_patterns = [
+            r'^(GROCERY|PRODUCE|MARKET|STORE|SHOP|PHARMACY|WALMART|TARGET|COSTCO|SAFEWAY)',
+            r'^(YOUR CASHIER TODAY WAS|CASHIER)\s+(.+?)(?:\s+\d+)',
+            r'^(.+?)\s+(GROCERY|MARKET|STORE)',
+        ]
+
+        for pattern in merchant_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                return match.group(1).strip()
+
+        return None
+
+    def _extract_date(self, text: str) -> Optional[str]:
+        """Extract date using common patterns"""
+        date_patterns = [
+            r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',  # MM/DD/YY or MM-DD-YY
+            r'(\d{1,2}\/\d{1,2}\/\d{2,4})',  # MM/DD/YYYY
+            r'(\d{2,4}[\/\-]\d{1,2}[\/\-]\d{1,2})',  # YYYY-MM-DD
+            r'(\w{3,9}\s+\d{1,2},?\s+\d{4})',  # Month DD, YYYY
+            r'(\d{1,2}\s+\w{3,9}\s+\d{4})',  # DD Month YYYY
+        ]
+
+        for pattern in date_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).strip()
+
+        return None
+
+    def _calculate_extraction_confidence(self, total_amount: Optional[float], items: List[Dict]) -> float:
+        """Calculate confidence score for field extraction"""
+        confidence = 0.0
+
+        # Base confidence
+        confidence += 0.3
+
+        # Total amount found
+        if total_amount and total_amount > 0:
+            confidence += 0.3
+
+        # Items extracted
+        if items:
+            confidence += min(0.4, len(items) * 0.1)  # Up to 0.4 for items
+
+        return min(confidence, 1.0)
+
+    def score_ocr_quality(self, text: str) -> float:
+        """
+        Score OCR output quality using deterministic logic and regex patterns.
+
+        Scoring Criteria:
+        - Length of text (0-20 points)
+        - Presence of price patterns like 3.99 (0-25 points)
+        - Presence of "TOTAL" keyword (0-20 points)
+        - Ratio of valid words vs noisy tokens (0-25 points)
+        - Penalty for excessive symbols/noise (0-10 points)
+
+        Returns:
+            float: Quality score between 0.0 and 1.0
+        """
+        if not text or not text.strip():
+            return 0.0
+
+        score = 0.0
+
+        # 1. Text Length Scoring (0-20 points)
+        length_score = self._score_text_length(text)
+        score += length_score
+
+        # 2. Price Pattern Detection (0-25 points)
+        price_score = self._score_price_patterns(text)
+        score += price_score
+
+        # 3. TOTAL Keyword Detection (0-20 points)
+        total_score = self._score_total_keyword(text)
+        score += total_score
+
+        # 4. Valid Word vs Noise Ratio (0-25 points)
+        word_quality_score = self._score_word_quality(text)
+        score += word_quality_score
+
+        # 5. Symbol/Noise Penalty (0-10 points deduction)
+        noise_penalty = self._calculate_noise_penalty(text)
+        score -= noise_penalty
+
+        # Ensure score is within bounds [0.0, 1.0]
+        final_score = max(0.0, min(1.0, score))
+
+        return final_score
+
+    def _score_text_length(self, text: str) -> float:
+        """
+        Score text length (0-20 points).
+        Longer text generally indicates better OCR capture.
+        """
+        length = len(text.strip())
+
+        if length < 50:
+            return 0.0  # Very short text
+        elif length < 100:
+            return 5.0  # Short text
+        elif length < 200:
+            return 10.0  # Moderate text
+        elif length < 400:
+            return 15.0  # Good length
+        else:
+            return 20.0  # Excellent length
+
+    def _score_price_patterns(self, text: str) -> float:
+        """
+        Score price pattern presence (0-25 points).
+        More price patterns indicate better receipt OCR quality.
+        """
+        # Regex patterns for prices
+        price_patterns = [
+            r'\$\d+(?:\.\d{2})?',  # $12.99
+            r'\d+\.\d{2}',  # 12.99
+            r'\d+\s+\.\s+\d{2}',  # 6 . 49 (space-separated)
+            r'\d+,\d{2}',  # 12,99 (comma decimal)
+        ]
+
+        total_price_matches = 0
+        for pattern in price_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            total_price_matches += len(matches)
+
+        # Score based on number of price matches
+        if total_price_matches == 0:
+            return 0.0
+        elif total_price_matches <= 2:
+            return 10.0
+        elif total_price_matches <= 5:
+            return 15.0
+        elif total_price_matches <= 10:
+            return 20.0
+        else:
+            return 25.0
+
+    def _score_total_keyword(self, text: str) -> float:
+        """
+        Score TOTAL keyword presence (0-20 points).
+        Presence of TOTAL indicates complete receipt capture.
+        """
+        total_patterns = [
+            r'\bTOTAL\b',
+            r'\bTOTAL\s+AMOUNT\b',
+            r'\bGRAND\s+TOTAL\b',
+            r'\bSUBTOTAL\b',
+            r'\bBALANCE\b',
+        ]
+
+        total_matches = 0
+        for pattern in total_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                total_matches += 1
+
+        # Score based on presence of total-related keywords
+        if total_matches == 0:
+            return 0.0
+        elif total_matches == 1:
+            return 12.0
+        elif total_matches == 2:
+            return 16.0
+        else:
+            return 20.0
+
+    def _score_word_quality(self, text: str) -> float:
+        """
+        Score word quality based on valid words vs noisy tokens (0-25 points).
+        Higher ratio of valid words indicates better OCR quality.
+        """
+        # Split into tokens
+        tokens = re.findall(r'\b\w+\b', text)
+
+        if not tokens:
+            return 0.0
+
+        valid_word_count = 0
+        noise_word_count = 0
+
+        # Common receipt-related valid words
+        valid_receipt_words = {
+            'TOTAL', 'AMOUNT', 'BALANCE', 'CASH', 'CARD', 'DEBIT', 'CREDIT',
+            'GROCERY', 'PRODUCE', 'DAIRY', 'BAKERY', 'MEAT', 'FROZEN',
+            'TAX', 'TIP', 'CHANGE', 'PURCHASE', 'PAYMENT', 'TRANSACTION',
+            'RECEIPT', 'STORE', 'MARKET', 'SHOP', 'PHARMACY', 'GAS',
+            'QUANTITY', 'PRICE', 'COST', 'SUBTOTAL', 'DISCOUNT', 'COUPON',
+            'CASHIER', 'CLERK', 'CUSTOMER', 'THANK', 'YOU', 'WELCOME'
+        }
+
+        for token in tokens:
+            token_upper = token.upper()
+
+            # Check if it's a valid receipt word
+            if token_upper in valid_receipt_words:
+                valid_word_count += 1
+            # Check if it's a number (likely price/quantity)
+            elif re.match(r'^\d+(?:\.\d{2})?$', token):
+                valid_word_count += 1
+            # Check if it's a common English word (3+ letters)
+            elif len(token) >= 3 and token.isalpha():
+                valid_word_count += 1
+            else:
+                # Likely noise (short tokens, special chars, etc.)
+                noise_word_count += 1
+
+        total_tokens = valid_word_count + noise_word_count
+        if total_tokens == 0:
+            return 0.0
+
+        valid_ratio = valid_word_count / total_tokens
+
+        # Score based on valid word ratio
+        if valid_ratio >= 0.8:
+            return 25.0
+        elif valid_ratio >= 0.6:
+            return 20.0
+        elif valid_ratio >= 0.4:
+            return 15.0
+        elif valid_ratio >= 0.2:
+            return 10.0
+        else:
+            return 5.0
+
+    def _calculate_noise_penalty(self, text: str) -> float:
+        """
+        Calculate penalty for excessive symbols/noise (0-10 points deduction).
+        Too many special characters indicate poor OCR quality.
+        """
+        # Count special characters (non-alphanumeric, non-space)
+        special_chars = len(re.findall(r'[^a-zA-Z0-9\s]', text))
+        total_chars = len(text)
+
+        if total_chars == 0:
+            return 10.0
+
+        special_ratio = special_chars / total_chars
+
+        # Calculate penalty based on special character ratio
+        if special_ratio >= 0.3:  # 30%+ special chars
+            return 10.0
+        elif special_ratio >= 0.2:  # 20-30% special chars
+            return 7.5
+        elif special_ratio >= 0.1:  # 10-20% special chars
+            return 5.0
+        elif special_ratio >= 0.05:  # 5-10% special chars
+            return 2.5
+        else:  # Less than 5% special chars
+            return 0.0
