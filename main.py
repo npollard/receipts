@@ -6,10 +6,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any
-from receipt_processor import ReceiptProcessor
-from database_models import DatabaseManager
-from pipeline import (
-    process_receipt,
+
+from pipeline.processor import (
+    ReceiptProcessor,
     process_batch_images,
     validate_and_get_image_files,
     print_batch_summary,
@@ -17,6 +16,7 @@ from pipeline import (
     save_token_usage_to_persistence,
     print_usage_summary
 )
+from database_models import DatabaseManager
 from config import DATABASE_URL, IS_TEST, app_config
 
 # Load environment variables

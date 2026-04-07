@@ -35,7 +35,7 @@ def test_build_prompt():
         parser = ReceiptParser()
         ocr_text = "MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
 
-        prompt = parser._build_prompt(ocr_text)
+        prompt = parser.build_prompt(ocr_text)
 
         assert "MILK 4.50" in prompt
         assert "BREAD 3.00" in prompt
@@ -62,9 +62,10 @@ def test_parse_text_success():
         result = parser.parse_text(ocr_text)
 
         assert result.status == "success"
-        assert "date" in result.data
-        assert "total" in result.data
-        assert "items" in result.data
+        # result.data is now a Pydantic model, not a dictionary
+        assert hasattr(result.data, 'date')
+        assert hasattr(result.data, 'total')
+        assert hasattr(result.data, 'items')
 
 
 def test_parse_text_pydantic_validation_failure():
@@ -85,7 +86,7 @@ def test_parse_text_pydantic_validation_failure():
         result = parser.parse_text(ocr_text)
 
         assert result.status == "failed"
-        assert "Validation error" in result.error
+        assert "Data validation failed" in result.error
 
 
 def test_parse_text_api_exception():

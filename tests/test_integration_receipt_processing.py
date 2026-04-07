@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from api_response import APIResponse
-from receipt_processor import ReceiptProcessor
+from pipeline.processor import ReceiptProcessor
 import main
 
 

@@ -5,8 +5,7 @@ from .api_response import APIResponse
 from .token_tracking import TokenUsage
 from .image_processing import ImageProcessor, VisionProcessor
 from .ai_parsing import ReceiptParser
-from .workflow import WorkflowOrchestrator
-from .receipt_processor import ReceiptProcessor
+from .pipeline.processor import ReceiptProcessor
 
 __all__ = [
     "Receipt",
@@ -16,6 +15,5 @@ __all__ = [
     "ImageProcessor",
     "VisionProcessor",
     "ReceiptParser",
-    "WorkflowOrchestrator",
     "ReceiptProcessor",
 ]
