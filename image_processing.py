@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 from langchain_core.tools import tool
-from services.ocr_service import OCRService
+from services.ocr.ocr_service import OCRService
 
 logger = logging.getLogger(__name__)
 

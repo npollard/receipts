@@ -2,7 +2,7 @@
 
 import logging
 from typing import Dict, Any
-from receipt_parser import ReceiptParser
+from .receipt_parser import ReceiptParser
 from token_usage_persistence import TokenUsagePersistence
 from tracking import TokenUsage
 

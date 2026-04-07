@@ -136,7 +136,7 @@ def test_import_compatibility():
 
     try:
         # Test import from workflow.py perspective
-        from receipt_parser import ReceiptParser
+        from domain.parsing.receipt_parser import ReceiptParser
         parser = ReceiptParser()
         print("Import from receipt_parser: SUCCESS")
 

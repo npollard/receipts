@@ -3,13 +3,13 @@
 import pytest
 import os
 from unittest.mock import Mock, patch
-from receipt_parser import ReceiptParser
+from domain.parsing.receipt_parser import ReceiptParser
 from api_response import APIResponse
 
 
 def test_receipt_parser_initialization():
     """Test ReceiptParser initialization with default settings"""
-    with patch('receipt_parser.ChatOpenAI'):
+    with patch('domain.parsing.receipt_parser.ChatOpenAI'):
         parser = ReceiptParser()
         assert parser.llm is not None
         assert parser.persistence is not None
@@ -17,7 +17,7 @@ def test_receipt_parser_initialization():
 
 def test_receipt_parser_initialization_custom_settings():
     """Test ReceiptParser initialization with custom settings"""
-    with patch('receipt_parser.ChatOpenAI') as mock_llm, \
+    with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm, \
          patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}):
         ReceiptParser(model_name="gpt-4o", temperature=0.5)
         mock_llm.assert_called_once_with(
@@ -29,8 +29,8 @@ def test_receipt_parser_initialization_custom_settings():
 
 def test_build_prompt():
     """Test prompt building from OCR text"""
-    with patch('receipt_parser.ChatOpenAI'), \
-         patch('receipt_parser.TokenUsagePersistence'):
+    with patch('domain.parsing.receipt_parser.ChatOpenAI'), \
+         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
 
         parser = ReceiptParser()
         ocr_text = "MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
@@ -51,10 +51,10 @@ def test_parse_text_success():
     expected_response.content = '{"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}]}'
     expected_response.usage_metadata = {"input_tokens": 100, "output_tokens": 50}
 
-    with patch('receipt_parser.ChatOpenAI') as mock_llm, \
-         patch('receipt_parser.validate_response_content', return_value=APIResponse.success({"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}]})), \
-         patch('receipt_parser.validate_with_pydantic', return_value=APIResponse.success({"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}], "_token_usage": {"input_tokens": 100, "output_tokens": 50}})), \
-         patch('receipt_parser.TokenUsagePersistence'):
+    with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm, \
+         patch('domain.parsing.receipt_parser.validate_response_content', return_value=APIResponse.success({"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}]})), \
+         patch('domain.parsing.receipt_parser.validate_with_pydantic', return_value=APIResponse.success({"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}], "_token_usage": {"input_tokens": 100, "output_tokens": 50}})), \
+         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
 
         mock_llm.return_value.invoke.return_value = expected_response
 
@@ -75,10 +75,10 @@ def test_parse_text_pydantic_validation_failure():
     expected_response.content = '{"date": "invalid-date", "total": "not-a-number", "items": []}'
     expected_response.usage_metadata = {"input_tokens": 100, "output_tokens": 50}
 
-    with patch('receipt_parser.ChatOpenAI') as mock_llm, \
-         patch('receipt_parser.validate_response_content', return_value=APIResponse.success({"date": "invalid-date", "total": "not-a-number", "items": []})), \
-         patch('receipt_parser.validate_with_pydantic', return_value=APIResponse.failure("Validation error")), \
-         patch('receipt_parser.TokenUsagePersistence'):
+    with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm, \
+         patch('domain.parsing.receipt_parser.validate_response_content', return_value=APIResponse.success({"date": "invalid-date", "total": "not-a-number", "items": []})), \
+         patch('domain.parsing.receipt_parser.validate_with_pydantic', return_value=APIResponse.failure("Validation error")), \
+         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
 
         mock_llm.return_value.invoke.return_value = expected_response
 
@@ -93,8 +93,8 @@ def test_parse_text_api_exception():
     """Test parsing when API call fails"""
     ocr_text = "MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
 
-    with patch('receipt_parser.ChatOpenAI') as mock_llm, \
-         patch('receipt_parser.TokenUsagePersistence'):
+    with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm, \
+         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
 
         mock_llm.return_value.invoke.side_effect = Exception("API Error")
 
@@ -106,19 +106,21 @@ def test_parse_text_api_exception():
 
 
 def test_parse_with_retry_success_on_first_attempt():
-    """Test retry mechanism succeeding on first attempt"""
+    """Test parsing with retry service - success on first attempt"""
     ocr_text = "MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
     expected_receipt = {"date": "2026-03-30", "total": 7.50, "items": [], "_token_usage": {"input_tokens": 100, "output_tokens": 50}}
 
-    with patch('receipt_parser.ChatOpenAI'), \
-         patch('receipt_parser.TokenUsagePersistence'):
+    with patch('domain.parsing.receipt_parser.ChatOpenAI'), \
+         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
 
         parser = ReceiptParser()
         token_usage = Mock()
+
+
 def test_get_token_usage_safely():
     """Test safe token usage extraction"""
-    with patch('receipt_parser.ChatOpenAI'), \
-         patch('receipt_parser.TokenUsagePersistence'):
+    with patch('domain.parsing.receipt_parser.ChatOpenAI'), \
+         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
 
         parser = ReceiptParser()
 

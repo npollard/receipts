@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from uuid import UUID
 
 from image_processing import VisionProcessor
-from receipt_parser import ReceiptParser
+from domain.parsing.receipt_parser import ReceiptParser
 from tracking import TokenUsage
 from token_usage_persistence import TokenUsagePersistence
 from utils.file_utils import get_image_files
@@ -267,7 +267,7 @@ def process_batch_images(image_files: List[Path], processor: ReceiptProcessor) -
     total_token_usage = TokenUsage()
 
     for i, image_path in enumerate(image_files, 1):
-        result = process_receipt(image_path, processor)
+        result = process_receipt(str(image_path), processor)
 
         # Track token usage from successful results
         if result.status == 'success' and result.data:

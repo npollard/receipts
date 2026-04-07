@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from models.receipt import Receipt
 from api_response import APIResponse
-from services.validation import ValidationService
+from .validation_service import ValidationService
 
 logger = logging.getLogger(__name__)
 
