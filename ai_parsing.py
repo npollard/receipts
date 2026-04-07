@@ -4,7 +4,7 @@ import logging
 from typing import Dict, Any
 from receipt_parser import ReceiptParser
 from token_usage_persistence import TokenUsagePersistence
-from token_tracking import TokenUsage
+from tracking import TokenUsage
 
 logger = logging.getLogger(__name__)
 

@@ -1,22 +1,21 @@
-"""Workflow orchestration utilities"""
+"""Workflow orchestrator for receipt processing pipeline"""
 
 import logging
-from typing import Dict, Any, Optional
-import json
+from typing import Optional
 from uuid import UUID
-from decimal import Decimal
 
 from image_processing import ImageProcessor
-from ai_parsing import ReceiptParser
-from token_tracking import TokenUsage
-from api_response import APIResponse
-from models import DecimalEncoder
+from receipt_parser import ReceiptParser
+from tracking import TokenUsage
 from database_models import DatabaseManager, Receipt
-from receipt_persistence import ReceiptPersistence
+from storage import ReceiptRepository, UserRepository
 from user_manager import UserManager
+from receipt_persistence import ReceiptPersistence
+from api_response import APIResponse
+
+from config import DEFAULT_USER_EMAIL
 
 logger = logging.getLogger(__name__)
-
 
 class WorkflowOrchestrator:
     """Orchestrates the receipt processing workflow with token tracking and persistence"""
@@ -26,25 +25,25 @@ class WorkflowOrchestrator:
         self.image_processor = image_processor
         self.ai_parser = ai_parser
         self.token_usage = TokenUsage()
-        self.db_manager = db_manager
-        self.persistence = None
-        self.user_manager = None
 
-        # Initialize persistence and user management if database provided
+        # Initialize persistence layer
         if db_manager:
             self.user_manager = UserManager(db_manager)
 
-            # Use provided user_id or get default user
             if user_id:
                 self.user_manager.set_user_by_id(user_id)
             else:
                 self.user_manager.get_or_create_default_user()
 
-            # Initialize persistence with current user
             current_user_id = self.user_manager.get_current_user_id()
+            self.repository = ReceiptRepository(current_user_id, db_manager.engine.url)
             self.persistence = ReceiptPersistence(db_manager, current_user_id)
+        else:
+            self.repository = None
+            self.persistence = None
+            self.user_manager = None
 
-        logger.info("Initialized WorkflowOrchestrator")
+        logger.info(f"Initialized WorkflowOrchestrator with db_manager={db_manager is not None}, user_id={user_id}")
 
     def process_image(self, image_path: str) -> APIResponse:
         """Process a single image through complete workflow with persistence"""
@@ -54,8 +53,8 @@ class WorkflowOrchestrator:
 
         try:
             # Check for duplicate if persistence is enabled
-            if self.persistence:
-                receipt_record = self.persistence.check_duplicate_receipt(image_path)
+            if self.repository:
+                receipt_record = self.repository.check_duplicate_receipt(image_path)
                 if receipt_record:
                     logger.info(f"Returning existing receipt: {receipt_record.id}")
                     return APIResponse.success({
@@ -66,85 +65,99 @@ class WorkflowOrchestrator:
                     })
 
             # Create pending receipt record
-            if self.persistence:
-                receipt_record = self.persistence.create_pending_receipt(image_path, "")
+            if self.repository:
+                receipt_record = self.repository.create_pending_receipt(image_path, "")
 
             # Step 1: Extract OCR text
             ocr_text = self.image_processor.extract_text(image_path)
             logger.info(f"Extracted OCR text: {ocr_text[:100]}..." if len(ocr_text) > 100 else f"Extracted OCR text: {ocr_text}")
 
-            # Update receipt with OCR data
-            if self.persistence and receipt_record:
-                # This would require adding update method to persistence
-                pass  # OCR text is already set during creation
-
             # Step 2: Parse with AI (with token tracking)
             parse_result = self.ai_parser.parse_with_usage_tracking(ocr_text, self.token_usage)
 
-            if parse_result.status == "success" and self.persistence and receipt_record:
-                # Check for duplicate receipt data before saving
-                duplicate_data_receipt = self.persistence.check_duplicate_receipt_data(parse_result.data)
-                if duplicate_data_receipt:
-                    logger.info(f"Found duplicate receipt data: {duplicate_data_receipt.id}")
-                    # Update the original pending record to reference the duplicate
-                    session = self.persistence.db_manager.get_session()
-                    try:
-                        original_receipt = session.query(Receipt).filter(Receipt.id == receipt_record.id).first()
-                        if original_receipt:
-                            session.delete(original_receipt)  # Remove the pending duplicate
-                            session.commit()
-                    except Exception as e:
-                        session.rollback()
-                        logger.error(f"Error removing duplicate pending record: {e}")
-                    finally:
-                        session.close()
-
-                    return APIResponse.success({
-                        "receipt_id": str(duplicate_data_receipt.id),
-                        "status": duplicate_data_receipt.processing_status,
-                        "data": duplicate_data_receipt.parsed_data,
-                        "duplicate": True,
-                        "duplicate_type": "data"
-                    })
-
-                # Update receipt with success
+            if parse_result.status == "success" and self.repository and receipt_record:
+                # Save receipt with idempotency handling
                 input_tokens = self.token_usage.input_tokens
                 output_tokens = self.token_usage.output_tokens
                 estimated_cost = self.token_usage.get_estimated_cost()
 
-                updated_receipt = self.persistence.update_receipt_success(
-                    receipt_record.id, parse_result, input_tokens, output_tokens, estimated_cost
+                updated_receipt, save_status = self.repository.save_receipt(
+                    image_path, ocr_text, parse_result, input_tokens, output_tokens, estimated_cost
                 )
 
+                if save_status == "duplicate":
+                    # Handle duplicate case
+                    logger.info(f"Duplicate receipt detected: {updated_receipt.id}")
+                    return APIResponse.success({
+                        "receipt_id": str(updated_receipt.id),
+                        "status": updated_receipt.processing_status,
+                        "data": updated_receipt.parsed_data,
+                        "duplicate": True,
+                        "duplicate_type": "existing"
+                    })
+
                 # Add receipt ID to response
-                result_data = parse_result.data.copy() if parse_result.data else {}
-                result_data["receipt_id"] = str(updated_receipt.id)
-                result_data["persisted"] = True
+                if hasattr(parse_result.data, 'model_dump'):
+                    # It's a ReceiptModel - create a copy with additional fields
+                    result_data = parse_result.data.model_dump()
+                    result_data["receipt_id"] = str(updated_receipt.id)
+                    result_data["persisted"] = True
+                    result_data["save_status"] = save_status
+                    # Add token usage to the result
+                    result_data["_token_usage"] = {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens
+                    }
+                else:
+                    # It's already a dict
+                    result_data = parse_result.data.copy() if parse_result.data else {}
+                    result_data["receipt_id"] = str(updated_receipt.id)
+                    result_data["persisted"] = True
+                    result_data["save_status"] = save_status
 
                 return APIResponse.success(result_data)
+            elif parse_result.status == "success":
+                # No repository mode - return result directly
+                return parse_result
 
-            elif parse_result.status != "success" and self.persistence and receipt_record:
+            elif parse_result.status != "success" and self.repository and receipt_record:
                 # Update receipt with failure
                 input_tokens = self.token_usage.input_tokens
                 output_tokens = self.token_usage.output_tokens
                 estimated_cost = self.token_usage.get_estimated_cost()
 
-                self.persistence.update_receipt_failure(
-                    receipt_record.id, parse_result.error, input_tokens, output_tokens, estimated_cost
+                updated_receipt = self.repository.update_receipt_failure(
+                    receipt_record.id, parse_result.error or "Unknown error",
+                    input_tokens, output_tokens, estimated_cost
                 )
 
-            return parse_result
+                # Add receipt ID to response
+                result_data = {
+                    "receipt_id": str(updated_receipt.id),
+                    "persisted": True,
+                    "_token_usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": input_tokens + output_tokens
+                    }
+                }
+
+                return APIResponse.failure(parse_result.error, result_data)
+            elif parse_result.status != "success":
+                # No repository mode - return failure directly
+                return parse_result
 
         except Exception as e:
             logger.error(f"Unexpected error processing {image_path}: {str(e)}")
 
             # Update receipt with failure if persistence enabled
-            if self.persistence and receipt_record:
+            if self.repository and receipt_record:
                 input_tokens = self.token_usage.input_tokens
                 output_tokens = self.token_usage.output_tokens
                 estimated_cost = self.token_usage.get_estimated_cost()
 
-                self.persistence.update_receipt_failure(
+                self.repository.update_receipt_failure(
                     receipt_record.id, str(e), input_tokens, output_tokens, estimated_cost
                 )
 

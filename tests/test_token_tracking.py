@@ -1,7 +1,7 @@
 """Unit tests for TokenUsage"""
 
 import pytest
-from token_tracking import TokenUsage
+from tracking import TokenUsage
 
 
 def test_token_usage_initialization():

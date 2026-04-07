@@ -12,19 +12,19 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.sql import func
-import os
+
+from config import DATABASE_URL, DATABASE_PATH
 
 Base = declarative_base()
 
 
 def get_uuid_column():
     """Get UUID column type based on database"""
-    # Check if we're using SQLite by checking DATABASE_URL or default
-    database_url = os.getenv("DATABASE_URL", "sqlite:///receipts.db")
-    if database_url.startswith("sqlite"):
+    # Check if we're using SQLite by checking DATABASE_URL
+    if DATABASE_URL.startswith("sqlite"):
         return String(36), lambda: str(uuid4())  # SQLite uses String
     else:
-        return PG_UUID(as_uuid=True), uuid4  # PostgreSQL uses UUID
+        return PG_UUID, uuid4  # PostgreSQL uses UUID
 
 
 # Get UUID column type and default function
@@ -43,6 +43,20 @@ class User(Base):
 
     # Relationships
     receipts = relationship("Receipt", back_populates="user", cascade="all, delete-orphan")
+
+    # Indexes
+    __table_args__ = (
+        # Email queries (most common for user lookup)
+        Index('idx_users_email', 'email'),
+
+        # Status and filtering queries
+        Index('idx_users_is_active', 'is_active'),
+        Index('idx_users_active_created', 'is_active', 'created_at'),
+
+        # Time-based queries
+        Index('idx_users_created_at', 'created_at'),
+        Index('idx_users_updated_at', 'updated_at'),
+    )
 
 
 class Receipt(Base):
@@ -84,14 +98,45 @@ class Receipt(Base):
     user = relationship("User", back_populates="receipts")
     items = relationship("ReceiptItem", back_populates="receipt", cascade="all, delete-orphan")
 
-    # Indexes
+    # Indexes and constraints
     __table_args__ = (
-        Index('idx_receipts_user_date', 'user_id', 'receipt_date'),
-        Index('idx_receipts_status', 'processing_status'),
-        Index('idx_receipts_created_at', 'created_at'),
+        # User-scoped queries (most common pattern)
+        Index('idx_receipts_user_id', 'user_id'),
+        Index('idx_receipts_user_status', 'user_id', 'processing_status'),
         Index('idx_receipts_user_created', 'user_id', 'created_at'),
+        Index('idx_receipts_user_date', 'user_id', 'receipt_date'),
+
+        # Status and filtering queries
+        Index('idx_receipts_status', 'processing_status'),
+        Index('idx_receipts_status_created', 'processing_status', 'created_at'),
+
+        # Date/time queries (ordering and filtering)
+        Index('idx_receipts_created_at', 'created_at'),
+        Index('idx_receipts_receipt_date', 'receipt_date'),
+        Index('idx_receipts_date_created', 'receipt_date', 'created_at'),
+
+        # Hash-based queries (idempotency)
         Index('idx_receipts_image_hash', 'image_hash'),
         Index('idx_receipts_data_hash', 'receipt_data_hash'),
+
+        # Unique constraints for idempotency (already indexed by unique constraint)
+        Index('uq_receipts_user_image_hash', 'user_id', 'image_hash', unique=True),
+        Index('uq_receipts_user_data_hash', 'user_id', 'receipt_data_hash', unique=True),
+
+        # Cost and analytics queries
+        Index('idx_receipts_estimated_cost', 'estimated_cost'),
+        Index('idx_receipts_total_amount', 'total_amount'),
+        Index('idx_receipts_user_cost', 'user_id', 'estimated_cost'),
+        Index('idx_receipts_user_total', 'user_id', 'total_amount'),
+
+        # Merchant and search queries
+        Index('idx_receipts_merchant_name', 'merchant_name'),
+        Index('idx_receipts_user_merchant', 'user_id', 'merchant_name'),
+
+        # Processing and retry queries
+        Index('idx_receipts_retry_count', 'retry_count'),
+        Index('idx_receipts_processing_started', 'processing_started_at'),
+        Index('idx_receipts_processing_completed', 'processing_completed_at'),
     )
 
 
@@ -120,16 +165,42 @@ class ReceiptItem(Base):
 
     # Indexes
     __table_args__ = (
+        # Foreign key queries (most common)
         Index('idx_receipt_items_receipt_id', 'receipt_id'),
+
+        # Category and filtering queries
         Index('idx_receipt_items_category', 'category'),
+        Index('idx_receipt_items_receipt_category', 'receipt_id', 'category'),
+
+        # Price and analytics queries
+        Index('idx_receipt_items_unit_price', 'unit_price'),
+        Index('idx_receipt_items_total_price', 'total_price'),
+        Index('idx_receipt_items_quantity', 'quantity'),
+
+        # Tax and business logic queries
+        Index('idx_receipt_items_is_taxable', 'is_taxable'),
+        Index('idx_receipt_items_taxable_category', 'is_taxable', 'category'),
+
+        # Search and description queries
+        Index('idx_receipt_items_description', 'description'),
+        Index('idx_receipt_items_receipt_description', 'receipt_id', 'description'),
+
+        # Composite indexes for common patterns
+        Index('idx_receipt_items_category_price', 'category', 'unit_price'),
+        Index('idx_receipt_items_receipt_category_price', 'receipt_id', 'category', 'unit_price'),
+
+        # Time-based queries
+        Index('idx_receipt_items_created_at', 'created_at'),
+        Index('idx_receipt_items_receipt_created', 'receipt_id', 'created_at'),
     )
 
 
 class DatabaseManager:
     """Database session management"""
 
-    def __init__(self, database_url: str):
-        self.engine = create_engine(database_url)
+    def __init__(self, database_url: Optional[str] = None):
+        self.database_url = database_url or DATABASE_URL
+        self.engine = create_engine(self.database_url)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
     def create_tables(self):
@@ -144,49 +215,12 @@ class DatabaseManager:
         """Close database connections"""
         self.engine.dispose()
 
-
-def calculate_image_hash(image_path: str) -> str:
-    """Calculate SHA-256 hash of image file for deduplication"""
-    hash_sha256 = hashlib.sha256()
-    try:
-        with open(image_path, "rb") as f:
-            # Read file in chunks to handle large files
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_sha256.update(chunk)
-        return hash_sha256.hexdigest()
-    except FileNotFoundError:
-        # If file doesn't exist, hash the path as fallback
-        return hashlib.sha256(image_path.encode()).hexdigest()
-
-
-def calculate_receipt_data_hash(receipt_data: Dict[str, Any]) -> str:
-    """Calculate SHA-256 hash of receipt data for idempotency"""
-    # Create a normalized representation of receipt data for hashing
-    normalized_data = {
-        'date': receipt_data.get('date'),
-        'total': receipt_data.get('total'),
-        'merchant': receipt_data.get('merchant', ''),
-        'items': []
-    }
-
-    # Normalize items for consistent hashing
-    items = receipt_data.get('items', [])
-    if items:
-        for item in items:
-            if isinstance(item, dict):
-                normalized_item = {
-                    'description': str(item.get('description', '')).lower().strip(),
-                    'price': float(item.get('price', 0)),
-                    'quantity': float(item.get('quantity', 1))
-                }
-                normalized_data['items'].append(normalized_item)
-
-        # Sort items by description and price for consistent ordering
-        normalized_data['items'].sort(key=lambda x: (x['description'], x['price']))
-
-    # Create hash from normalized data
-    data_string = json.dumps(normalized_data, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(data_string.encode()).hexdigest()
+    @property
+    def database_path(self) -> Optional[str]:
+        """Get database file path for SQLite"""
+        if self.database_url.startswith("sqlite"):
+            return str(DATABASE_PATH)
+        return None
 
 
 def parse_receipt_date(date_value: Any) -> Optional[date]:

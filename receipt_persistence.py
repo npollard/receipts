@@ -9,8 +9,9 @@ from uuid import UUID
 from api_response import APIResponse
 from database_models import (
     DatabaseManager, Receipt, ReceiptItem, User,
-    calculate_image_hash, calculate_receipt_data_hash, parse_receipt_date, extract_merchant_name
+    parse_receipt_date, extract_merchant_name
 )
+from utils.hashing import calculate_image_hash, calculate_receipt_data_hash
 import os
 
 logger = logging.getLogger(__name__)

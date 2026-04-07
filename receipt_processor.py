@@ -3,7 +3,7 @@
 from image_processing import VisionProcessor
 from ai_parsing import ReceiptParser
 from workflow import WorkflowOrchestrator
-from token_tracking import TokenUsage
+from tracking import TokenUsage
 from api_response import APIResponse
 from database_models import DatabaseManager
 from typing import Dict, Any, Optional

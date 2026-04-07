@@ -6,7 +6,7 @@ from workflow import WorkflowOrchestrator
 from image_processing import ImageProcessor
 from ai_parsing import ReceiptParser
 from api_response import APIResponse
-from token_tracking import TokenUsage
+from tracking import TokenUsage
 
 
 def test_workflow_orchestrator_initialization():
