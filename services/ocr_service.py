@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
 from utils.file_utils import encode_file_base64
+from config.ocr_config import OCRConfig, ENV_OCR_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -19,42 +20,67 @@ logger = logging.getLogger(__name__)
 class OCRService:
     """Service for OCR text extraction using local EasyOCR"""
 
-    def __init__(self, use_gpu: bool = False, lang: List[str] = ['en'], confidence_threshold: float = 0.7, debug: bool = False, comparison_mode: bool = False, quality_threshold: float = 0.25, debug_ocr: bool = False):
+    def __init__(self, config: OCRConfig = None, use_gpu: bool = None, lang: List[str] = None, confidence_threshold: float = None, debug: bool = None, comparison_mode: bool = None, quality_threshold: float = None, debug_ocr: bool = None):
         """
-        Initialize EasyOCR service
+        Initialize EasyOCR service with configurable settings
 
         Args:
-            use_gpu: Whether to use GPU acceleration
-            lang: List of language codes for OCR (e.g., ['en'], ['en', 'ch'])
-            confidence_threshold: Minimum confidence score for text extraction (0.0-1.0)
-            debug: Enable debug logging for OCR pipeline stages
-            comparison_mode: Enable comparison with OpenAI Vision OCR for evaluation
-            quality_threshold: Minimum OCR quality score before fallback to Vision OCR (0.0-1.0)
-            debug_ocr: Enable detailed OCR decision observability (scores, fallback, comparisons)
+            config: OCRConfig instance (takes precedence over individual parameters)
+            use_gpu: Whether to use GPU acceleration (overrides config if provided)
+            lang: List of language codes for OCR (overrides config if provided)
+            confidence_threshold: Minimum confidence score for text extraction (overrides config if provided)
+            debug: Enable debug logging for OCR pipeline stages (overrides config if provided)
+            comparison_mode: Enable comparison with OpenAI Vision OCR for evaluation (overrides config if provided)
+            quality_threshold: Minimum OCR quality score before fallback to Vision OCR (overrides config if provided)
+            debug_ocr: Enable detailed OCR decision observability (overrides config if provided)
         """
-        self.use_gpu = use_gpu
-        self.lang = lang
-        self.confidence_threshold = max(0.0, min(1.0, confidence_threshold))  # Clamp to valid range
-        self.debug = debug
-        self.comparison_mode = comparison_mode
-        self.quality_threshold = max(0.0, min(1.0, quality_threshold))  # Clamp to valid range
-        self.debug_ocr = debug_ocr
+        # Use provided config or environment-based config
+        if config is None:
+            config = ENV_OCR_CONFIG
+
+        # Override config with explicit parameters if provided
+        if use_gpu is not None:
+            config = config.override(use_gpu=use_gpu)
+        if lang is not None:
+            config = config.override(languages=lang)
+        if confidence_threshold is not None:
+            config = config.override(confidence_threshold=confidence_threshold)
+        if debug is not None:
+            config = config.override(debug=debug)
+        if comparison_mode is not None:
+            config = config.override(comparison_mode=comparison_mode)
+        if quality_threshold is not None:
+            config = config.override(quality_threshold=quality_threshold)
+        if debug_ocr is not None:
+            config = config.override(debug_ocr=debug_ocr)
+
+        # Store configuration
+        self.config = config
+
+        # Set instance attributes for backward compatibility
+        self.use_gpu = config.use_gpu
+        self.lang = config.languages
+        self.confidence_threshold = config.confidence_threshold
+        self.debug = config.debug
+        self.comparison_mode = config.comparison_mode
+        self.quality_threshold = config.quality_threshold
+        self.debug_ocr = config.debug_ocr
 
         # Initialize EasyOCR with specified languages
-        self.ocr = easyocr.Reader(lang, gpu=use_gpu)
+        self.ocr = easyocr.Reader(config.languages, gpu=config.use_gpu)
 
         # Initialize OpenAI Vision client for comparison mode
-        if comparison_mode:
+        if config.comparison_mode:
             self.vision_llm = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0.0,
+                model=config.openai_model,
+                temperature=config.openai_temperature,
                 api_key=os.environ.get("OPENAI_API_KEY")
             )
 
         self._preprocess_chain = RunnableLambda(self._preprocess_image)
         self._ocr_chain = RunnableLambda(self._extract_easyocr_text)
 
-        logger.info(f"Initialized OCRService with EasyOCR (GPU: {use_gpu}, Lang: {lang}, Confidence: {self.confidence_threshold}, Debug: {debug}, Comparison: {comparison_mode}, Quality Threshold: {self.quality_threshold}, Debug OCR: {debug_ocr})")
+        logger.info(f"Initialized OCRService with EasyOCR (GPU: {config.use_gpu}, Lang: {config.languages}, Confidence: {config.confidence_threshold}, Debug: {config.debug}, Comparison: {config.comparison_mode}, Quality Threshold: {config.quality_threshold}, Debug OCR: {config.debug_ocr})")
 
     def preprocess_image(self, image_path: str) -> Any:
         """Preprocess image for OCR"""
