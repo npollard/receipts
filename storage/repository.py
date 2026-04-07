@@ -47,14 +47,14 @@ class ReceiptRepository:
         finally:
             session.close()
 
-    def check_duplicate_receipt(self, image_path: str) -> Optional[Receipt]:
+    def check_existing_receipt_by_image_hash(self, image_path: str) -> Optional[Receipt]:
         """Check if receipt already exists by image hash"""
         session = self.db_connection.get_session()
         try:
-            image_hash = calculate_image_hash(image_path)
+            receipt_hash = calculate_image_hash(image_path)
             receipt = session.query(Receipt).filter(
                 Receipt.user_id == self._user_id_for_db,
-                Receipt.image_hash == image_hash
+                Receipt.receipt_hash == receipt_hash
             ).first()
 
             if receipt:
@@ -109,14 +109,14 @@ class ReceiptRepository:
                 logger.info(f"Returning existing receipt due to idempotency: {existing_receipt.id}")
                 return existing_receipt, "duplicate"
 
-            image_hash = calculate_image_hash(image_path)
+            receipt_hash = calculate_image_hash(image_path)
 
             # Prepare receipt data
             receipt_data = {
                 'user_id': self._user_id_for_db,
                 'image_path': image_path,
-                'image_hash': image_hash,
-                'processing_status': 'success' if parsed_response.success else 'failed',
+                'receipt_hash': receipt_hash,
+                'status': 'success' if parsed_response.success else 'failed',
                 'raw_ocr_text': ocr_text,
                 'ocr_confidence': Decimal(str(ocr_confidence)) if ocr_confidence else None,
                 'processing_started_at': datetime.utcnow(),
@@ -126,10 +126,9 @@ class ReceiptRepository:
                 'estimated_cost': estimated_cost
             }
 
-            # Add receipt data hash and parsed data if successful
+            # Add parsed data if successful
             if parsed_response.success and parsed_response.data:
                 receipt_model = parsed_response.data
-                receipt_data['receipt_data_hash'] = calculate_data_hash(receipt_model.model_dump())
                 receipt_data['receipt_date'] = parse_receipt_date(receipt_model.date)
                 receipt_data['total_amount'] = receipt_model.total
                 receipt_data['merchant_name'] = extract_merchant_name(ocr_text, receipt_model.model_dump())
@@ -168,18 +167,17 @@ class ReceiptRepository:
         finally:
             session.close()
 
-    def create_pending_receipt(self, image_path: str, ocr_text: str,
-                              ocr_confidence: Optional[float] = None) -> Receipt:
+    def create_pending_receipt(self, image_path: str, ocr_text: str, ocr_confidence: Optional[float] = None) -> Receipt:
         """Create a new receipt record in pending status"""
         session = self.db_connection.get_session()
         try:
-            image_hash = calculate_image_hash(image_path)
+            receipt_hash = calculate_image_hash(image_path)
 
             receipt = Receipt(
                 user_id=self._user_id_for_db,
                 image_path=image_path,
-                image_hash=image_hash,
-                processing_status='pending',
+                receipt_hash=receipt_hash,
+                status='pending',
                 raw_ocr_text=ocr_text,
                 ocr_confidence=Decimal(str(ocr_confidence)) if ocr_confidence else None,
                 processing_started_at=datetime.utcnow()
@@ -218,7 +216,7 @@ class ReceiptRepository:
                 raise ValueError(f"Receipt not found: {receipt_id}")
 
             # Update receipt with parsed data
-            receipt.processing_status = 'success'
+            receipt.status = 'success'
             receipt.processing_completed_at = datetime.utcnow()
             receipt.input_tokens = input_tokens
             receipt.output_tokens = output_tokens
@@ -266,7 +264,7 @@ class ReceiptRepository:
             if not receipt:
                 raise ValueError(f"Receipt not found: {receipt_id}")
 
-            receipt.processing_status = 'failed'
+            receipt.status = 'failed'
             receipt.processing_completed_at = datetime.utcnow()
             receipt.processing_error = error_message[:1000] if error_message else None
             receipt.input_tokens = input_tokens
@@ -293,7 +291,7 @@ class ReceiptRepository:
             query = session.query(Receipt).filter(Receipt.user_id == self._user_id_for_db)
 
             if status:
-                query = query.filter(Receipt.processing_status == status)
+                query = query.filter(Receipt.status == status)
 
             receipts = query.order_by(Receipt.created_at.desc()).offset(offset).limit(limit).all()
             return receipts
@@ -355,12 +353,12 @@ class ReceiptRepository:
 
             successful_receipts = session.query(Receipt).filter(
                 Receipt.user_id == self._user_id_for_db,
-                Receipt.processing_status == 'success'
+                Receipt.status == 'success'
             ).count()
 
             failed_receipts = session.query(Receipt).filter(
                 Receipt.user_id == self._user_id_for_db,
-                Receipt.processing_status == 'failed'
+                Receipt.status == 'failed'
             ).count()
 
             total_cost = session.query(Receipt).filter(

@@ -66,19 +66,23 @@ class Receipt(Base):
     id = Column(UUID_COL_TYPE, primary_key=True, default=UUID_DEFAULT)
     user_id = Column(UUID_COL_TYPE, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     image_path = Column(String(500), nullable=False)
-    image_hash = Column(String(64), unique=True, nullable=True)  # SHA-256 hash for deduplication
-    receipt_data_hash = Column(String(64), unique=True, nullable=True)  # SHA-256 hash of receipt data for idempotency
-    processing_status = Column(String(20), nullable=False, default='pending')
+    receipt_hash = Column(String(64), unique=True, nullable=False)  # SHA-256 hash for deduplication
+    status = Column(String(20), nullable=False, default='pending')  # Processing status
+
+    # Receipt metadata
+    receipt_date = Column(Date)
+    merchant_name = Column(String(255))
+    total_amount = Column(Numeric(10, 2))
+    subtotal = Column(Numeric(10, 2))
+    tax_amount = Column(Numeric(10, 2))
+    tip_amount = Column(Numeric(10, 2))
 
     # Raw OCR data
     raw_ocr_text = Column(Text)
     ocr_confidence = Column(Numeric(3, 2))  # 0.00 to 1.00
 
     # Parsed receipt data
-    receipt_date = Column(Date)
-    total_amount = Column(Numeric(10, 2))
-    merchant_name = Column(String(255))
-    parsed_data = Column(JSON)  # Cross-compatible JSON type
+    parsed_data = Column(Text)  # JSON as TEXT for SQLite compatibility
 
     # Processing metadata
     processing_started_at = Column(DateTime(timezone=True))
@@ -86,11 +90,12 @@ class Receipt(Base):
     processing_error = Column(Text)
     retry_count = Column(Integer, default=0)
 
-    # Token usage tracking
+    # Cost tracking
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
     estimated_cost = Column(Numeric(10, 6), default=0.000000)  # in USD
 
+    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -102,13 +107,13 @@ class Receipt(Base):
     __table_args__ = (
         # User-scoped queries (most common pattern)
         Index('idx_receipts_user_id', 'user_id'),
-        Index('idx_receipts_user_status', 'user_id', 'processing_status'),
+        Index('idx_receipts_user_status', 'user_id', 'status'),
         Index('idx_receipts_user_created', 'user_id', 'created_at'),
         Index('idx_receipts_user_date', 'user_id', 'receipt_date'),
 
         # Status and filtering queries
-        Index('idx_receipts_status', 'processing_status'),
-        Index('idx_receipts_status_created', 'processing_status', 'created_at'),
+        Index('idx_receipts_status', 'status'),
+        Index('idx_receipts_status_created', 'status', 'created_at'),
 
         # Date/time queries (ordering and filtering)
         Index('idx_receipts_created_at', 'created_at'),
@@ -116,12 +121,10 @@ class Receipt(Base):
         Index('idx_receipts_date_created', 'receipt_date', 'created_at'),
 
         # Hash-based queries (idempotency)
-        Index('idx_receipts_image_hash', 'image_hash'),
-        Index('idx_receipts_data_hash', 'receipt_data_hash'),
+        Index('idx_receipts_receipt_hash', 'receipt_hash'),
 
-        # Unique constraints for idempotency (already indexed by unique constraint)
-        Index('uq_receipts_user_image_hash', 'user_id', 'image_hash', unique=True),
-        Index('uq_receipts_user_data_hash', 'user_id', 'receipt_data_hash', unique=True),
+        # Unique constraint on receipt_hash (already enforced by column UNIQUE)
+        Index('idx_receipts_user_hash', 'user_id', 'receipt_hash', unique=True),
 
         # Cost and analytics queries
         Index('idx_receipts_estimated_cost', 'estimated_cost'),
@@ -142,12 +145,13 @@ class Receipt(Base):
 
 class ReceiptItem(Base):
     """Receipt line items for detailed tracking"""
-    __tablename__ = 'receipt_items'
+    __tablename__ = 'line_items'
 
     id = Column(UUID_COL_TYPE, primary_key=True, default=UUID_DEFAULT)
     receipt_id = Column(UUID_COL_TYPE, ForeignKey('receipts.id', ondelete='CASCADE'), nullable=False)
 
     # Item details
+    line_number = Column(Integer, nullable=False, default=1)
     description = Column(String(255), nullable=False)
     quantity = Column(Numeric(8, 2), default=1.00)
     unit_price = Column(Numeric(10, 2), nullable=False)
@@ -156,6 +160,7 @@ class ReceiptItem(Base):
     # Category information
     category = Column(String(100))
     is_taxable = Column(Boolean, default=True)
+    tax_rate = Column(Numeric(5, 4), default=0.0000)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

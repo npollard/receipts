@@ -54,12 +54,12 @@ class WorkflowOrchestrator:
         try:
             # Check for duplicate if persistence is enabled
             if self.repository:
-                receipt_record = self.repository.check_duplicate_receipt(image_path)
+                receipt_record = self.repository.check_existing_receipt_by_image_hash(image_path)
                 if receipt_record:
                     logger.info(f"Returning existing receipt: {receipt_record.id}")
                     return APIResponse.success({
                         "receipt_id": str(receipt_record.id),
-                        "status": receipt_record.processing_status,
+                        "status": receipt_record.status,
                         "data": receipt_record.parsed_data,
                         "duplicate": True
                     })
@@ -90,7 +90,7 @@ class WorkflowOrchestrator:
                     logger.info(f"Duplicate receipt detected: {updated_receipt.id}")
                     return APIResponse.success({
                         "receipt_id": str(updated_receipt.id),
-                        "status": updated_receipt.processing_status,
+                        "status": updated_receipt.status,
                         "data": updated_receipt.parsed_data,
                         "duplicate": True,
                         "duplicate_type": "existing"

@@ -20,12 +20,12 @@ class IdempotencyHelper:
 
     def check_existing_receipt_by_image_hash(self, user_id: str, image_path: str) -> Optional[Receipt]:
         """Check if receipt already exists by image hash"""
-        image_hash = calculate_image_hash(image_path)
+        receipt_hash = calculate_image_hash(image_path)
 
         try:
             receipt = self.session.query(Receipt).filter(
                 Receipt.user_id == user_id,
-                Receipt.image_hash == image_hash
+                Receipt.receipt_hash == receipt_hash
             ).first()
 
             if receipt:

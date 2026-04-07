@@ -141,7 +141,7 @@ class ReceiptPersistence:
                 raise ValueError(f"Receipt not found: {receipt_id}")
 
             # Update receipt with parsed data
-            receipt.processing_status = 'success'
+            receipt.status = 'success'
             receipt.processing_completed_at = datetime.utcnow()
             receipt.input_tokens = input_tokens
             receipt.output_tokens = output_tokens
@@ -150,14 +150,20 @@ class ReceiptPersistence:
             if parsed_response.success and parsed_response.data:
                 data = parsed_response.data
 
-                # Calculate and set receipt data hash for idempotency
-                receipt.receipt_data_hash = calculate_receipt_data_hash(data)
-
-                # Extract basic fields
-                receipt.receipt_date = parse_receipt_date(data.get('date'))
-                receipt.total_amount = Decimal(str(data.get('total', 0))) if data.get('total') else None
-                receipt.merchant_name = extract_merchant_name(receipt.raw_ocr_text, data)
-                receipt.parsed_data = data
+                # Update receipt with parsed data
+                receipt.receipt_date = parse_receipt_date(data.date)
+                receipt.total_amount = data.total
+                receipt.merchant_name = extract_merchant_name(receipt.raw_ocr_text, data.model_dump())
+                # Convert model_dump to JSON-serializable format
+                parsed_dict = data.model_dump()
+                # Convert Decimals to strings for JSON storage
+                if 'total' in parsed_dict and parsed_dict['total'] is not None:
+                    parsed_dict['total'] = str(parsed_dict['total'])
+                if 'items' in parsed_dict:
+                    for item in parsed_dict['items']:
+                        if 'price' in item and item['price'] is not None:
+                            item['price'] = str(item['price'])
+                receipt.parsed_data = parsed_dict
 
                 # Create receipt items
                 if 'items' in data and data['items']:
@@ -189,7 +195,7 @@ class ReceiptPersistence:
             if not receipt:
                 raise ValueError(f"Receipt not found: {receipt_id}")
 
-            receipt.processing_status = 'failed'
+            receipt.status = 'failed'
             receipt.processing_completed_at = datetime.utcnow()
             receipt.processing_error = error_message[:1000] if error_message else None  # Limit error length
             receipt.input_tokens = input_tokens
@@ -243,7 +249,7 @@ class ReceiptPersistence:
             query = session.query(Receipt).filter(Receipt.user_id == self.user_id)
 
             if status:
-                query = query.filter(Receipt.processing_status == status)
+                query = query.filter(Receipt.status == status)
 
             receipts = query.order_by(Receipt.created_at.desc()).offset(offset).limit(limit).all()
             return receipts

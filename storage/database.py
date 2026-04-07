@@ -118,9 +118,9 @@ class DatabaseQueryHelper:
         if user_id and hasattr(model_class, 'user_id'):
             query = query.filter(model_class.user_id == user_id)
 
-        # Apply status filter if provided and model has processing_status
-        if status_filter and hasattr(model_class, 'processing_status'):
-            query = query.filter(model_class.processing_status == status_filter)
+        # Apply status filter if provided and model has status
+        if status_filter and hasattr(model_class, 'status'):
+            query = query.filter(model_class.status == status_filter)
 
         # Apply ordering
         order_field = getattr(model_class, order_by_field)
@@ -140,8 +140,8 @@ class DatabaseQueryHelper:
         if user_id and hasattr(model_class, 'user_id'):
             query = query.filter(model_class.user_id == user_id)
 
-        if status_filter and hasattr(model_class, 'processing_status'):
-            query = query.filter(model_class.processing_status == status_filter)
+        if status_filter and hasattr(model_class, 'status'):
+            query = query.filter(model_class.status == status_filter)
 
         return query.count()
 
