@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class OCRService:
     """Service for OCR text extraction using local EasyOCR"""
 
-    def __init__(self, use_gpu: bool = False, lang: List[str] = ['en'], confidence_threshold: float = 0.7, debug: bool = False, comparison_mode: bool = False):
+    def __init__(self, use_gpu: bool = False, lang: List[str] = ['en'], confidence_threshold: float = 0.7, debug: bool = False, comparison_mode: bool = False, quality_threshold: float = 0.25, debug_ocr: bool = False):
         """
         Initialize EasyOCR service
 
@@ -29,12 +29,16 @@ class OCRService:
             confidence_threshold: Minimum confidence score for text extraction (0.0-1.0)
             debug: Enable debug logging for OCR pipeline stages
             comparison_mode: Enable comparison with OpenAI Vision OCR for evaluation
+            quality_threshold: Minimum OCR quality score before fallback to Vision OCR (0.0-1.0)
+            debug_ocr: Enable detailed OCR decision observability (scores, fallback, comparisons)
         """
         self.use_gpu = use_gpu
         self.lang = lang
         self.confidence_threshold = max(0.0, min(1.0, confidence_threshold))  # Clamp to valid range
         self.debug = debug
         self.comparison_mode = comparison_mode
+        self.quality_threshold = max(0.0, min(1.0, quality_threshold))  # Clamp to valid range
+        self.debug_ocr = debug_ocr
 
         # Initialize EasyOCR with specified languages
         self.ocr = easyocr.Reader(lang, gpu=use_gpu)
@@ -50,18 +54,153 @@ class OCRService:
         self._preprocess_chain = RunnableLambda(self._preprocess_image)
         self._ocr_chain = RunnableLambda(self._extract_easyocr_text)
 
-        logger.info(f"Initialized OCRService with EasyOCR (GPU: {use_gpu}, Lang: {lang}, Confidence: {self.confidence_threshold}, Debug: {debug}, Comparison: {comparison_mode})")
+        logger.info(f"Initialized OCRService with EasyOCR (GPU: {use_gpu}, Lang: {lang}, Confidence: {self.confidence_threshold}, Debug: {debug}, Comparison: {comparison_mode}, Quality Threshold: {self.quality_threshold}, Debug OCR: {debug_ocr})")
 
     def preprocess_image(self, image_path: str) -> Any:
         """Preprocess image for OCR"""
         return self._preprocess_image(image_path)
 
     def extract_text(self, image_path: str) -> str:
-        """Extract text from image using EasyOCR"""
+        """Extract text from image using EasyOCR with quality-based fallback to Vision OCR"""
         if self.comparison_mode:
             return self._extract_with_comparison(image_path)
         else:
-            return self._extract_easyocr_text(image_path)
+            return self._extract_with_quality_fallback(image_path)
+
+    def _extract_with_quality_fallback(self, image_path: str) -> str:
+        """Extract text using EasyOCR with automatic fallback to Vision OCR based on quality score"""
+        try:
+            # Debug OCR header
+            if self.debug_ocr:
+                print(f"\n{'='*60}")
+                print(f"OCR DECISION DEBUG FOR: {os.path.basename(image_path)}")
+                print(f"{'='*60}")
+                print(f"Quality Threshold: {self.quality_threshold:.3f}")
+                print(f"Debug Mode: ENABLED")
+
+            # First, extract text using EasyOCR
+            easyocr_text = self._extract_easyocr_text(image_path)
+
+            # Calculate quality score
+            quality_score = self.score_ocr_quality(easyocr_text)
+
+            # Log quality score
+            logger.info(f"EasyOCR Quality Score: {quality_score:.3f} (threshold: {self.quality_threshold:.3f}) for {image_path}")
+
+            # Debug OCR score printing
+            if self.debug_ocr:
+                print(f"\n--- EASYOCR RESULTS ---")
+                print(f"Quality Score: {quality_score:.3f}")
+                print(f"Text Length: {len(easyocr_text)} characters")
+                print(f"Text Preview: {easyocr_text[:200]}{'...' if len(easyocr_text) > 200 else ''}")
+
+                # Show component scores
+                reasoning = self.get_fallback_reasoning(easyocr_text, self.quality_threshold)
+                print(f"\n--- QUALITY SCORE BREAKDOWN ---")
+                print(f"Text Length: {reasoning['component_scores']['text_length']:.1f}/20")
+                print(f"Price Patterns: {reasoning['component_scores']['price_patterns']:.1f}/25")
+                print(f"Total Keywords: {reasoning['component_scores']['total_keyword']:.1f}/20")
+                print(f"Word Quality: {reasoning['component_scores']['word_quality']:.1f}/25")
+                print(f"Noise Penalty: -{reasoning['component_scores']['noise_penalty']:.1f}/10")
+                print(f"Total Raw Score: {sum(reasoning['component_scores'].values()) - 2*reasoning['component_scores']['noise_penalty']:.1f}/100")
+
+            # Determine if fallback is needed
+            should_fallback = self.should_fallback(easyocr_text, self.quality_threshold)
+
+            # Debug fallback decision
+            if self.debug_ocr:
+                print(f"\n--- FALLBACK DECISION ---")
+                print(f"Quality Score ({quality_score:.3f}) < Threshold ({self.quality_threshold:.3f}): {should_fallback}")
+                print(f"Fallback Required: {'YES' if should_fallback else 'NO'}")
+
+                if should_fallback:
+                    print(f"Reasoning: {reasoning['reasoning']}")
+                else:
+                    print(f"Reasoning: Good quality OCR - using EasyOCR result")
+
+            if should_fallback:
+                logger.warning(f"EasyOCR quality below threshold - falling back to Vision OCR for {image_path}")
+
+                # Debug fallback initiation
+                if self.debug_ocr:
+                    print(f"\n--- INITIATING FALLBACK TO VISION OCR ---")
+
+                # Fallback to Vision OCR
+                vision_text = self._extract_vision_text(image_path)
+
+                # Calculate Vision OCR quality score
+                vision_quality_score = self.score_ocr_quality(vision_text)
+                logger.info(f"Vision OCR Quality Score: {vision_quality_score:.3f} for {image_path}")
+
+                # Debug Vision OCR results
+                if self.debug_ocr:
+                    print(f"\n--- VISION OCR RESULTS ---")
+                    print(f"Quality Score: {vision_quality_score:.3f}")
+                    print(f"Text Length: {len(vision_text)} characters")
+                    print(f"Text Preview: {vision_text[:200]}{'...' if len(vision_text) > 200 else ''}")
+
+                    # Show Vision OCR component scores
+                    vision_reasoning = self.get_fallback_reasoning(vision_text, self.quality_threshold)
+                    print(f"\n--- VISION OCR QUALITY BREAKDOWN ---")
+                    print(f"Text Length: {vision_reasoning['component_scores']['text_length']:.1f}/20")
+                    print(f"Price Patterns: {vision_reasoning['component_scores']['price_patterns']:.1f}/25")
+                    print(f"Total Keywords: {vision_reasoning['component_scores']['total_keyword']:.1f}/20")
+                    print(f"Word Quality: {vision_reasoning['component_scores']['word_quality']:.1f}/25")
+                    print(f"Noise Penalty: -{vision_reasoning['component_scores']['noise_penalty']:.1f}/10")
+
+                # Use Vision OCR result
+                final_text = vision_text
+                logger.info(f"Using Vision OCR result for {image_path}")
+
+                # Debug final decision
+                if self.debug_ocr:
+                    print(f"\n--- FINAL DECISION ---")
+                    print(f"Selected OCR: VISION OCR")
+                    print(f"Reason: EasyOCR quality below threshold")
+            else:
+                # Use EasyOCR result
+                final_text = easyocr_text
+                logger.info(f"Using EasyOCR result for {image_path}")
+
+                # Debug final decision
+                if self.debug_ocr:
+                    print(f"\n--- FINAL DECISION ---")
+                    print(f"Selected OCR: EASYOCR")
+                    print(f"Reason: Quality acceptable")
+
+            # Debug final output
+            if self.debug_ocr:
+                print(f"\n--- FINAL OUTPUT ---")
+                print(f"Selected Text Length: {len(final_text)} characters")
+                print(f"Selected Text Preview: {final_text[:300]}{'...' if len(final_text) > 300 else ''}")
+                print(f"{'='*60}\n")
+
+            return final_text
+
+        except Exception as e:
+            logger.error(f"Error in quality-based OCR extraction for {image_path}: {str(e)}")
+
+            # Debug error handling
+            if self.debug_ocr:
+                print(f"\n--- ERROR HANDLING ---")
+                print(f"Error: {str(e)}")
+                print(f"Initiating emergency fallback to basic EasyOCR")
+
+            # Fallback to basic EasyOCR without quality scoring
+            try:
+                return self._extract_easyocr_text(image_path)
+            except Exception as fallback_error:
+                logger.error(f"Fallback EasyOCR also failed for {image_path}: {str(fallback_error)}")
+
+                # Debug catastrophic failure
+                if self.debug_ocr:
+                    print(f"\n--- CATASTROPHIC FAILURE ---")
+                    print(f"Both EasyOCR and fallback failed")
+                    print(f"Primary Error: {str(e)}")
+                    print(f"Fallback Error: {str(fallback_error)}")
+                    print(f"{'='*60}\n")
+
+                raise
 
     def _extract_with_comparison(self, image_path: str) -> str:
         """Extract text using both EasyOCR and OpenAI Vision for comparison"""
@@ -1025,3 +1164,102 @@ class OCRService:
             return 2.5
         else:  # Less than 5% special chars
             return 0.0
+
+    def should_fallback(self, text: str, threshold: float = 0.25) -> bool:
+        """
+        Determine when to fallback to Vision OCR based on quality score.
+
+        Args:
+            text: OCR text to evaluate
+            threshold: Quality threshold below which fallback is recommended (default: 0.25)
+
+        Returns:
+            bool: True if fallback to Vision OCR is needed, False otherwise
+        """
+        if not text or not text.strip():
+            logger.warning("Empty text provided for fallback decision - recommending fallback")
+            return True
+
+        # Calculate OCR quality score
+        quality_score = self.score_ocr_quality(text)
+
+        # Log the quality score for debugging
+        logger.info(f"OCR Quality Score: {quality_score:.3f} (threshold: {threshold:.3f})")
+
+        # Make fallback decision
+        should_fallback = quality_score < threshold
+
+        if should_fallback:
+            logger.warning(f"OCR quality below threshold ({quality_score:.3f} < {threshold:.3f}) - recommending fallback to Vision OCR")
+        else:
+            logger.info(f"OCR quality acceptable ({quality_score:.3f} >= {threshold:.3f}) - using EasyOCR result")
+
+        return should_fallback
+
+    def get_fallback_reasoning(self, text: str, threshold: float = 0.25) -> Dict[str, Any]:
+        """
+        Get detailed reasoning for fallback decision.
+
+        Args:
+            text: OCR text to evaluate
+            threshold: Quality threshold for fallback decision
+
+        Returns:
+            Dict containing detailed scoring breakdown and reasoning
+        """
+        if not text or not text.strip():
+            return {
+                'should_fallback': True,
+                'quality_score': 0.0,
+                'threshold': threshold,
+                'reasoning': 'Empty text - automatic fallback recommended',
+                'component_scores': {},
+                'recommendation': 'FALLBACK'
+            }
+
+        # Calculate component scores
+        length_score = self._score_text_length(text)
+        price_score = self._score_price_patterns(text)
+        total_score = self._score_total_keyword(text)
+        word_score = self._score_word_quality(text)
+        noise_penalty = self._calculate_noise_penalty(text)
+        quality_score = self.score_ocr_quality(text)
+
+        # Determine reasoning
+        reasoning_parts = []
+
+        if length_score < 10:
+            reasoning_parts.append(f"Text too short ({len(text)} chars)")
+
+        if price_score < 15:
+            reasoning_parts.append("Insufficient price patterns detected")
+
+        if total_score < 12:
+            reasoning_parts.append("Missing TOTAL/AMOUNT keywords")
+
+        if word_score < 15:
+            reasoning_parts.append("Low word quality (many noisy tokens)")
+
+        if noise_penalty > 5:
+            reasoning_parts.append("Excessive special characters/noise")
+
+        # Create recommendation
+        should_fallback = quality_score < threshold
+        recommendation = "FALLBACK" if should_fallback else "USE_EASYOCR"
+
+        reasoning = "; ".join(reasoning_parts) if reasoning_parts else "Good quality OCR"
+
+        return {
+            'should_fallback': should_fallback,
+            'quality_score': quality_score,
+            'threshold': threshold,
+            'reasoning': reasoning,
+            'recommendation': recommendation,
+            'component_scores': {
+                'text_length': length_score,
+                'price_patterns': price_score,
+                'total_keyword': total_score,
+                'word_quality': word_score,
+                'noise_penalty': noise_penalty
+            }
+        }
