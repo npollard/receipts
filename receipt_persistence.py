@@ -8,7 +8,7 @@ from uuid import UUID
 
 from api_response import APIResponse
 from database_models import (
-    DatabaseManager, Receipt, ReceiptItem, User,
+    DatabaseManager, Receipt, ReceiptItem, User, Session,
     parse_receipt_date, extract_merchant_name
 )
 from core.hashing import calculate_image_hash, calculate_receipt_data_hash

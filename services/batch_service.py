@@ -15,6 +15,12 @@ from tracking import TokenUsage
 from api_response import APIResponse
 from core.file_operations import get_image_files
 from core.logging import get_batch_logger
+from utils.output_formatter import format_receipt_result
+
+# Reduce logging noise - set specific loggers to WARNING level
+logging.getLogger('services.ocr_service').setLevel(logging.WARNING)
+logging.getLogger('domain.validation.validation_service').setLevel(logging.WARNING)
+logging.getLogger('services.retry_service').setLevel(logging.WARNING)
 
 logger = get_batch_logger(__name__)
 
@@ -34,26 +40,65 @@ class BatchProcessingService(BatchProcessingInterface):
         total_token_usage = TokenUsage()
 
         for i, image_path in enumerate(image_files, 1):
-            # Process image using interfaces
+            # Process image using interfaces with validation-driven retry
             ocr_text = image_processor.extract_text(str(image_path))
-            result = receipt_parser.parse_text(ocr_text)
+            result = receipt_parser.parse_with_validation_driven_retry(ocr_text, str(image_path))
 
-            # Track token usage from successful results
-            if result.status == 'success' and result.data:
-                token_usage = receipt_parser.get_token_usage()
-                if token_usage:
-                    total_token_usage.add_usage(
-                        token_usage.input_tokens,
-                        token_usage.output_tokens
-                    )
+            # Collect structured result for formatted output
+            # result is now ParsingResult with .parsed, .valid, .error, .token_usage
+            # parsed can be a Receipt object or a dict (when validation failed but data preserved)
+            if result.parsed is None:
+                parsed_data = {}
+            elif hasattr(result.parsed, '__dict__'):
+                # It's a Receipt object
+                parsed_data = result.parsed.__dict__
+            elif isinstance(result.parsed, dict):
+                # It's a dict (preserved after validation failure)
+                parsed_data = result.parsed
+            else:
+                parsed_data = {}
 
-            # Update counters
-            if result.status == 'success':
+            # Extract token usage from result (accumulated across all attempts)
+            token_data = {
+                'input_tokens': result.token_usage.input_tokens if result.token_usage else 0,
+                'output_tokens': result.token_usage.output_tokens if result.token_usage else 0,
+                'total_tokens': result.token_usage.get_total_tokens() if result.token_usage else 0
+            }
+
+            # Determine actual success status:
+            # SUCCESS only if validation passed (valid=True) AND receipt has meaningful content
+            has_meaningful_data = (
+                result.valid and
+                parsed_data and
+                parsed_data.get('items') and
+                len(parsed_data.get('items', [])) > 0 and
+                parsed_data.get('total') is not None
+            )
+
+            formatted_result = {
+                'image_path': str(image_path),
+                'success': has_meaningful_data,
+                'parsed_receipt': parsed_data,  # Preserved even on validation failure
+                'retries': receipt_parser.get_current_retries() if hasattr(receipt_parser, 'get_current_retries') else [],
+                'validation_error': result.error if result.error else None,
+                'token_usage': token_data
+            }
+
+            # Print formatted output instead of raw logging
+            print(format_receipt_result(formatted_result))
+
+            # Track token usage from result (accumulated across initial + all retries)
+            if result.token_usage:
+                total_token_usage.add_usage(
+                    result.token_usage.input_tokens,
+                    result.token_usage.output_tokens
+                )
+
+            # Update counters - success only if validation passed
+            if result.valid and parsed_data:
                 successful_processes += 1
-                logger.info(f"Successfully processed {image_path}")
             else:
                 failed_processes += 1
-                logger.error(f"Failed to process {image_path}")
 
         return successful_processes, failed_processes, total_token_usage
 

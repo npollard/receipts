@@ -17,6 +17,8 @@ class ValidationService:
 
     def validate_response_content(self, response) -> APIResponse:
         """Validate and extract content from OpenAI response"""
+        parsed_data = None  # Track parsed data for preservation on failure
+
         try:
             # Log raw response content for debugging
             logger.debug(f"Raw response content: {repr(response.content)}")
@@ -25,25 +27,34 @@ class ValidationService:
 
             # Check if response content exists
             if not hasattr(response, 'content') or not response.content:
-                raise CustomValidationError("Empty response content received from AI model")
+                return APIResponse.failure("Empty response content received from AI model", data=None)
 
             # Parse JSON content
             try:
                 parsed_data = json.loads(response.content)
             except json.JSONDecodeError as e:
-                raise CustomValidationError(f"Invalid JSON format in response: {str(e)}. Response content: {response.content[:200]}...")
+                return APIResponse.failure(f"Invalid JSON format in response: {str(e)}. Response content: {response.content[:200]}...", data=None)
             except Exception as e:
-                raise CustomValidationError(f"Unexpected error parsing JSON response: {str(e)}")
+                return APIResponse.failure(f"Unexpected error parsing JSON response: {str(e)}", data=None)
 
             # Validate parsed data structure
             if not isinstance(parsed_data, dict):
-                raise CustomValidationError(f"Expected JSON object, got {type(parsed_data).__name__}")
+                return APIResponse.failure(f"Expected JSON object, got {type(parsed_data).__name__}", data=parsed_data)
 
             # Check for required fields
             required_fields = ['date', 'total', 'items']
             missing_fields = [field for field in required_fields if field not in parsed_data]
             if missing_fields:
-                raise CustomValidationError(f"Missing required fields in response: {missing_fields}")
+                return APIResponse.failure(f"Missing required fields in response: {missing_fields}", data=parsed_data)
+
+            # Validate that receipt has meaningful content (at least 1 item)
+            if 'items' in parsed_data and parsed_data['items'] is not None:
+                if not isinstance(parsed_data['items'], list):
+                    return APIResponse.failure(f"Expected items to be a list, got {type(parsed_data['items']).__name__}", data=parsed_data)
+
+                # Receipts with 0 items are invalid
+                if len(parsed_data['items']) == 0:
+                    return APIResponse.failure("Receipt must contain at least 1 item to be valid", data=parsed_data)
 
             # Validate data types
             if 'total' in parsed_data and parsed_data['total'] is not None:
@@ -56,19 +67,19 @@ class ValidationService:
                     elif not isinstance(parsed_data['total'], Decimal):
                         raise ValueError(f"Invalid total type: {type(parsed_data['total']).__name__}")
                 except (ValueError, TypeError) as e:
-                    raise CustomValidationError(f"Invalid total value '{parsed_data['total']}': {str(e)}")
+                    return APIResponse.failure(f"Invalid total value '{parsed_data['total']}': {str(e)}", data=parsed_data)
 
             if 'items' in parsed_data and parsed_data['items'] is not None:
                 if not isinstance(parsed_data['items'], list):
-                    raise CustomValidationError(f"Expected items to be a list, got {type(parsed_data['items']).__name__}")
+                    return APIResponse.failure(f"Expected items to be a list, got {type(parsed_data['items']).__name__}", data=parsed_data)
 
                 # Validate each item
                 for i, item in enumerate(parsed_data['items']):
                     if not isinstance(item, dict):
-                        raise CustomValidationError(f"Item {i+1} should be a dictionary, got {type(item).__name__}")
+                        return APIResponse.failure(f"Item {i+1} should be a dictionary, got {type(item).__name__}", data=parsed_data)
 
                     if 'name' in item and not isinstance(item['name'], str):
-                        raise CustomValidationError(f"Item {i+1} name should be a string, got {type(item['name']).__name__}")
+                        return APIResponse.failure(f"Item {i+1} name should be a string, got {type(item['name']).__name__}", data=parsed_data)
 
                     if 'price' in item and item['price'] is not None:
                         try:
@@ -79,18 +90,17 @@ class ValidationService:
                             elif not isinstance(item['price'], Decimal):
                                 raise ValueError(f"Invalid price type: {type(item['price']).__name__}")
                         except (ValueError, TypeError) as e:
-                            raise CustomValidationError(f"Invalid price value '{item['price']}' in item {i+1}: {str(e)}")
+                            return APIResponse.failure(f"Invalid price value '{item['price']}' in item {i+1}: {str(e)}", data=parsed_data)
 
             logger.debug(f"Parsed JSON data: {parsed_data}")
             logger.info(f"Successfully validated receipt with {len(parsed_data.get('items', []))} items")
 
-            return APIResponse.success(parsed_data)
+            # Use the graceful Pydantic validation with total adjustment
+            return self.validate_with_pydantic(parsed_data, 0, 0)
 
-        except CustomValidationError:
-            # Re-raise validation-specific exceptions
-            raise
         except Exception as e:
-            raise CustomValidationError(f"Unexpected error during response validation: {str(e)}")
+            logger.error(f"Unexpected error during response validation: {str(e)}")
+            return APIResponse.failure(f"Unexpected error during response validation: {str(e)}", data=parsed_data)
 
     def validate_with_pydantic(self, parsed_data: dict, input_tokens: int, output_tokens: int) -> APIResponse:
         """Validate parsed data with Pydantic and handle errors"""
@@ -112,10 +122,13 @@ class ValidationService:
                 error_type = error.get('type', 'unknown')
                 logger.error(f"  Error {i}: Field '{field}' - {message} (type: {error_type})")
 
-            # Log the problematic data for debugging
-            logger.debug(f"Problematic data: {json.dumps(parsed_data, indent=2, default=str)}")
-
-            return self.handle_validation_error(e, parsed_data, input_tokens, output_tokens)
+            # Return validation failure WITH the parsed data for preservation
+            logger.error(f"Pydantic validation failed: {str(e)}")
+            logger.info(f"Preserving parsed data despite validation failure: {parsed_data}")
+            return APIResponse.failure(f"Data validation failed: {str(e)}", data=parsed_data)
+        except Exception as e:
+            logger.error(f"Unexpected error during validation: {str(e)}")
+            return APIResponse.failure(f"Validation error: {str(e)}", data=parsed_data)
 
     def handle_validation_error(self, e: ValidationError, parsed_data: dict, input_tokens: int, output_tokens: int) -> APIResponse:
         """Handle Pydantic validation errors with proper serialization"""

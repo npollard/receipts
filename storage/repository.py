@@ -53,7 +53,7 @@ class ReceiptRepository:
         finally:
             session.close()
 
-    def check_existing_receipt_by_image_hash(self, image_path: str) -> Optional[Receipt]:
+    def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[Receipt]:
         """Check if receipt already exists by image hash"""
         session = self.db_connection.get_session()
         try:
@@ -266,116 +266,8 @@ class ReceiptRepository:
         finally:
             session.close()
 
-    def check_existing_receipt_by_image_hash(self, image_path: str) -> Optional[Receipt]:
-        """Check if a receipt already exists for the given image hash"""
-        session = self.db_connection.get_session()
-        try:
-            receipt_hash = calculate_image_hash(image_path)
-
-            receipt = session.query(Receipt).filter(
-                Receipt.user_id == self._user_id_for_db,
-                Receipt.receipt_hash == receipt_hash
-            ).first()
-
-            if receipt:
-                logger.info(f"Found existing receipt {receipt.id} for image hash {receipt_hash}")
-
-            return receipt
-
-        except Exception as e:
-            raise StorageError(f"Error checking existing receipt: {str(e)}")
-        finally:
-            session.close()
-
-    def update_receipt_success(self, receipt_id: UUID, parsed_response: APIResponse,
-                             input_tokens: int = 0, output_tokens: int = 0,
-                             estimated_cost: Decimal = Decimal('0.000000')) -> Receipt:
-        """Update receipt with successful parsing results"""
-        # Validate that parsed_response.data is a ReceiptModel
-        if parsed_response.success and parsed_response.data:
-            if not isinstance(parsed_response.data, ReceiptModel):
-                raise ValueError("parsed_response.data must be a ReceiptModel instance")
-
-        session = self.db_connection.get_session()
-        try:
-            receipt = session.query(Receipt).filter(
-                Receipt.id == receipt_id,
-                Receipt.user_id == self._user_id_for_db
-            ).first()
-
-            if not receipt:
-                raise ValueError(f"Receipt not found: {receipt_id}")
-
-            # Update receipt with parsed data
-            receipt.status = 'success'
-            receipt.processing_completed_at = datetime.utcnow()
-            receipt.input_tokens = input_tokens
-            receipt.output_tokens = output_tokens
-            receipt.estimated_cost = estimated_cost
-
-            if parsed_response.success and parsed_response.data:
-                receipt_model = parsed_response.data  # This is now guaranteed to be ReceiptModel
-
-                # Calculate and set receipt data hash for idempotency
-                receipt.receipt_data_hash = calculate_data_hash(receipt_model.model_dump())
-
-                # Extract basic fields from validated model
-                receipt.receipt_date = parse_receipt_date(receipt_model.date)
-                receipt.total_amount = receipt_model.total
-                receipt.merchant_name = extract_merchant_name(receipt.raw_ocr_text, receipt_model.model_dump())
-                receipt.parsed_data = receipt_model.model_dump()
-
-                # Create receipt items from validated model
-                if receipt_model.items:
-                    self._create_receipt_items_from_models(session, receipt.id, receipt_model.items)
-
-            session.commit()
-            session.refresh(receipt)
-
-            logger.info(f"Updated receipt with success: {receipt.id}")
-            return receipt
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error updating receipt success: {e}")
-            raise
-        finally:
-            session.close()
-
-    def update_receipt_failure(self, receipt_id: UUID, error_message: str,
-                             input_tokens: int = 0, output_tokens: int = 0,
-                             estimated_cost: Decimal = Decimal('0.000000')) -> Receipt:
-        """Update receipt with failure information"""
-        session = self.db_connection.get_session()
-        try:
-            receipt = session.query(Receipt).filter(
-                Receipt.id == receipt_id,
-                Receipt.user_id == self._user_id_for_db
-            ).first()
-
-            if not receipt:
-                raise ValueError(f"Receipt not found: {receipt_id}")
-
-            receipt.status = 'failed'
-            receipt.processing_completed_at = datetime.utcnow()
-            receipt.processing_error = error_message[:1000] if error_message else None
-            receipt.input_tokens = input_tokens
-            receipt.output_tokens = output_tokens
-            receipt.estimated_cost = estimated_cost
-
-            session.commit()
-            session.refresh(receipt)
-
-            logger.info(f"Updated receipt with failure: {receipt.id}")
-            return receipt
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error updating receipt failure: {e}")
-            raise
-        finally:
-            session.close()
-
-    def get_receipts(self, limit: int = 50, offset: int = 0,
-                    status: Optional[str] = None) -> List[Receipt]:
+    def fetch_user_receipts(self, limit: int = 50, offset: int = 0,
+                           status: Optional[str] = None) -> List[Receipt]:
         """Get user's receipts with pagination"""
         session = self.db_connection.get_session()
         try:

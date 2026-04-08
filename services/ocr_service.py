@@ -2,8 +2,20 @@
 
 import re
 import os
-from typing import Any, List, Dict
+import warnings
+from typing import Any, List, Dict, Optional
 from langchain_core.runnables import RunnableLambda
+
+# Detect MPS device and suppress torch warnings before importing EasyOCR
+try:
+    import torch
+    is_mps = torch.backends.mps.is_available()
+    if is_mps:
+        # Suppress pin_memory warning on MPS devices
+        warnings.filterwarnings('ignore', message='.*pin_memory.*', category=UserWarning)
+except ImportError:
+    is_mps = False
+
 import easyocr
 from PIL import Image
 import numpy as np
@@ -73,13 +85,12 @@ class OCRService:
         # Initialize EasyOCR with specified languages
         self.ocr = easyocr.Reader(config.languages, gpu=config.use_gpu)
 
-        # Initialize OpenAI Vision client for comparison mode
-        if config.comparison_mode:
-            self.vision_llm = ChatOpenAI(
-                model=config.openai_model,
-                temperature=config.openai_temperature,
-                api_key=os.environ.get("OPENAI_API_KEY")
-            )
+        # Initialize OpenAI Vision client for fallback and comparison mode
+        self.vision_llm = ChatOpenAI(
+            model=config.openai_model,
+            temperature=config.openai_temperature,
+            api_key=os.environ.get("OPENAI_API_KEY")
+        )
 
         self._preprocess_chain = RunnableLambda(self._preprocess_image)
         self._ocr_chain = RunnableLambda(self._extract_easyocr_text)
@@ -90,147 +101,183 @@ class OCRService:
         """Preprocess image for OCR"""
         return self._preprocess_image(image_path)
 
-    def extract_text(self, image_path: str) -> str:
-        """Extract text from image using EasyOCR with quality-based fallback to Vision OCR"""
+    def extract_text(self, image_path: str, use_vision_fallback: bool = False) -> str:
+        """Extract text from image using EasyOCR with quality-based fallback to Vision OCR
+
+        Args:
+            image_path: Path to the image file
+            use_vision_fallback: If True, use Vision OCR directly instead of EasyOCR
+        """
+        if use_vision_fallback:
+            logger.info("Using Vision OCR fallback")
+            return self._extract_vision_text(image_path)
+
         if self.comparison_mode:
             return self._extract_with_comparison(image_path)
         else:
             return self._extract_with_quality_fallback(image_path)
 
+    def _log_debug_header(self, image_path: str):
+        """Log debug header for OCR processing"""
+        logger.debug("="*60)
+        logger.debug(f"OCR DECISION DEBUG FOR: {os.path.basename(image_path)}")
+        logger.debug("="*60)
+        logger.debug(f"Quality Threshold: {self.quality_threshold:.3f}")
+        logger.debug("Debug Mode: ENABLED")
+
+    def _log_ocr_results(self, text: str, quality_score: float, ocr_type: str = "EASYOCR"):
+        """Log OCR results with quality information"""
+        logger.debug(f"--- {ocr_type} RESULTS ---")
+        logger.debug(f"Quality Score: {quality_score:.3f}")
+        logger.debug(f"Text Length: {len(text)} characters")
+        logger.debug(f"Text Preview: {text[:200]}{'...' if len(text) > 200 else ''}")
+
+    def _log_quality_breakdown(self, reasoning: dict, ocr_type: str = "EASYOCR"):
+        """Log detailed quality score breakdown"""
+        logger.debug(f"--- {ocr_type} QUALITY BREAKDOWN ---")
+        scores = reasoning['component_scores']
+        logger.debug(f"Text Length: {scores['text_length']:.1f}/20")
+        logger.debug(f"Price Patterns: {scores['price_patterns']:.1f}/25")
+        logger.debug(f"Total Keywords: {scores['total_keyword']:.1f}/20")
+        logger.debug(f"Word Quality: {scores['word_quality']:.1f}/25")
+        logger.debug(f"Noise Penalty: -{scores['noise_penalty']:.1f}/10")
+        total_score = sum(scores.values()) - 2*scores['noise_penalty']
+        logger.debug(f"Total Raw Score: {total_score:.1f}/100")
+
+    def _log_fallback_decision(self, quality_score: float, should_fallback: bool, reasoning: dict):
+        """Log fallback decision with reasoning"""
+        logger.debug("--- FALLBACK DECISION ---")
+        logger.debug(f"Quality Score ({quality_score:.3f}) < Threshold ({self.quality_threshold:.3f}): {should_fallback}")
+        logger.debug(f"Fallback Required: {'YES' if should_fallback else 'NO'}")
+
+        if should_fallback:
+            logger.debug(f"Reasoning: {reasoning['reasoning']}")
+        else:
+            logger.debug("Reasoning: Good quality OCR - using EasyOCR result")
+
+    def _log_final_decision(self, selected_ocr: str, reason: str):
+        """Log final OCR selection decision"""
+        logger.debug("--- FINAL DECISION ---")
+        logger.debug(f"Selected OCR: {selected_ocr}")
+        logger.debug(f"Reason: {reason}")
+
+    def _log_final_output(self, text: str):
+        """Log final OCR output"""
+        logger.debug("--- FINAL OUTPUT ---")
+        logger.debug(f"Selected Text Length: {len(text)} characters")
+        logger.debug(f"Selected Text Preview: {text[:300]}{'...' if len(text) > 300 else ''}")
+        logger.debug("="*60)
+
+    def _log_error_handling(self, error: Exception):
+        """Log error handling information"""
+        logger.debug("--- ERROR HANDLING ---")
+        logger.debug(f"Error: {str(error)}")
+        logger.debug("Initiating emergency fallback to basic EasyOCR")
+
+    def _log_catastrophic_failure(self, primary_error: Exception, fallback_error: Exception):
+        """Log catastrophic failure information"""
+        logger.debug("--- CATASTROPHIC FAILURE ---")
+        logger.debug("Both EasyOCR and fallback failed")
+        logger.debug(f"Primary Error: {str(primary_error)}")
+        logger.debug(f"Fallback Error: {str(fallback_error)}")
+        logger.debug("="*60)
+
     def _extract_with_quality_fallback(self, image_path: str) -> str:
         """Extract text using EasyOCR with automatic fallback to Vision OCR based on quality score"""
         try:
-            # Debug OCR header
             if self.debug_ocr:
-                logger.debug("="*60)
-                logger.debug(f"OCR DECISION DEBUG FOR: {os.path.basename(image_path)}")
-                logger.debug("="*60)
-                logger.debug(f"Quality Threshold: {self.quality_threshold:.3f}")
-                logger.debug("Debug Mode: ENABLED")
+                self._log_debug_header(image_path)
 
-            # First, extract text using EasyOCR
+            # Extract text using EasyOCR
             easyocr_text = self._extract_easyocr_text(image_path)
-
-            # Calculate quality score
             quality_score = self.score_ocr_quality(easyocr_text)
 
-            # Log quality score
             logger.info(f"EasyOCR Quality Score: {quality_score:.3f} (threshold: {self.quality_threshold:.3f}) for {image_path}")
 
-            # Debug OCR score printing
             if self.debug_ocr:
-                logger.debug("--- EASYOCR RESULTS ---")
-                logger.debug(f"Quality Score: {quality_score:.3f}")
-                logger.debug(f"Text Length: {len(easyocr_text)} characters")
-                logger.debug(f"Text Preview: {easyocr_text[:200]}{'...' if len(easyocr_text) > 200 else ''}")
-
-                # Show component scores
                 reasoning = self.get_fallback_reasoning(easyocr_text, self.quality_threshold)
-                logger.debug("--- QUALITY SCORE BREAKDOWN ---")
-                logger.debug(f"Text Length: {reasoning['component_scores']['text_length']:.1f}/20")
-                logger.debug(f"Price Patterns: {reasoning['component_scores']['price_patterns']:.1f}/25")
-                logger.debug(f"Total Keywords: {reasoning['component_scores']['total_keyword']:.1f}/20")
-                logger.debug(f"Word Quality: {reasoning['component_scores']['word_quality']:.1f}/25")
-                logger.debug(f"Noise Penalty: -{reasoning['component_scores']['noise_penalty']:.1f}/10")
-                logger.debug(f"Total Raw Score: {sum(reasoning['component_scores'].values()) - 2*reasoning['component_scores']['noise_penalty']:.1f}/100")
+                self._log_ocr_results(easyocr_text, quality_score, "EASYOCR")
+                self._log_quality_breakdown(reasoning, "EASYOCR")
 
             # Determine if fallback is needed
             should_fallback = self.should_fallback(easyocr_text, self.quality_threshold)
 
-            # Debug fallback decision
             if self.debug_ocr:
-                logger.debug("--- FALLBACK DECISION ---")
-                logger.debug(f"Quality Score ({quality_score:.3f}) < Threshold ({self.quality_threshold:.3f}): {should_fallback}")
-                logger.debug(f"Fallback Required: {'YES' if should_fallback else 'NO'}")
-
-                if should_fallback:
-                    logger.debug(f"Reasoning: {reasoning['reasoning']}")
-                else:
-                    logger.debug("Reasoning: Good quality OCR - using EasyOCR result")
+                self._log_fallback_decision(quality_score, should_fallback, reasoning)
 
             if should_fallback:
-                logger.warning(f"EasyOCR quality below threshold - falling back to Vision OCR for {image_path}")
-
-                # Debug fallback initiation
-                if self.debug_ocr:
-                    logger.debug("--- INITIATING FALLBACK TO VISION OCR ---")
-
-                # Fallback to Vision OCR
-                vision_text = self._extract_vision_text(image_path)
-
-                # Calculate Vision OCR quality score
-                vision_quality_score = self.score_ocr_quality(vision_text)
-                logger.info(f"Vision OCR Quality Score: {vision_quality_score:.3f} for {image_path}")
-
-                # Debug Vision OCR results
-                if self.debug_ocr:
-                    print(f"\n--- VISION OCR RESULTS ---")
-                    print(f"Quality Score: {vision_quality_score:.3f}")
-                    print(f"Text Length: {len(vision_text)} characters")
-                    print(f"Text Preview: {vision_text[:200]}{'...' if len(vision_text) > 200 else ''}")
-
-                    # Show Vision OCR component scores
-                    vision_reasoning = self.get_fallback_reasoning(vision_text, self.quality_threshold)
-                    print(f"\n--- VISION OCR QUALITY BREAKDOWN ---")
-                    print(f"Text Length: {vision_reasoning['component_scores']['text_length']:.1f}/20")
-                    print(f"Price Patterns: {vision_reasoning['component_scores']['price_patterns']:.1f}/25")
-                    print(f"Total Keywords: {vision_reasoning['component_scores']['total_keyword']:.1f}/20")
-                    print(f"Word Quality: {vision_reasoning['component_scores']['word_quality']:.1f}/25")
-                    print(f"Noise Penalty: -{vision_reasoning['component_scores']['noise_penalty']:.1f}/10")
-
-                # Use Vision OCR result
-                final_text = vision_text
-                logger.info(f"Using Vision OCR result for {image_path}")
-
-                # Debug final decision
-                if self.debug_ocr:
-                    print(f"\n--- FINAL DECISION ---")
-                    print(f"Selected OCR: VISION OCR")
-                    print(f"Reason: EasyOCR quality below threshold")
+                return self._handle_fallback_to_vision(image_path, easyocr_text, quality_score)
             else:
-                # Use EasyOCR result
-                final_text = easyocr_text
-                logger.info(f"Using EasyOCR result for {image_path}")
-
-                # Debug final decision
-                if self.debug_ocr:
-                    print(f"\n--- FINAL DECISION ---")
-                    print(f"Selected OCR: EASYOCR")
-                    print(f"Reason: Quality acceptable")
-
-            # Debug final output
-            if self.debug_ocr:
-                print(f"\n--- FINAL OUTPUT ---")
-                print(f"Selected Text Length: {len(final_text)} characters")
-                print(f"Selected Text Preview: {final_text[:300]}{'...' if len(final_text) > 300 else ''}")
-                print(f"{'='*60}\n")
-
-            return final_text
+                return self._use_easyocr_result(easyocr_text)
 
         except Exception as e:
-            logger.error(f"Error in quality-based OCR extraction for {image_path}: {str(e)}")
+            return self._handle_extraction_error(e, image_path)
 
-            # Debug error handling
-            if self.debug_ocr:
-                print(f"\n--- ERROR HANDLING ---")
-                print(f"Error: {str(e)}")
-                print(f"Initiating emergency fallback to basic EasyOCR")
+    def _handle_fallback_to_vision(self, image_path: str, easyocr_text: str, easyocr_quality: float) -> str:
+        """Handle fallback to Vision OCR when EasyOCR quality is insufficient"""
+        logger.warning(f"EasyOCR quality below threshold - falling back to Vision OCR for {image_path}")
 
-            # Fallback to basic EasyOCR without quality scoring
+        if self.debug_ocr:
+            logger.debug("--- INITIATING FALLBACK TO VISION OCR ---")
+
+        # Extract text using Vision OCR
+        vision_text = self._extract_vision_text(image_path)
+        vision_quality_score = self.score_ocr_quality(vision_text)
+
+        logger.info(f"Vision OCR Quality Score: {vision_quality_score:.3f} for {image_path}")
+
+        if self.debug_ocr:
+            vision_reasoning = self.get_fallback_reasoning(vision_text, self.quality_threshold)
+            self._log_ocr_results(vision_text, vision_quality_score, "VISION OCR")
+            self._log_quality_breakdown(vision_reasoning, "VISION OCR")
+            self._log_final_decision("VISION OCR", "EasyOCR quality below threshold")
+
+        return vision_text
+
+    def _use_easyocr_result(self, easyocr_text: str) -> str:
+        """Use EasyOCR result when quality is acceptable"""
+        logger.info("Using EasyOCR result")
+
+        if self.debug_ocr:
+            self._log_final_decision("EASYOCR", "Quality acceptable")
+            self._log_final_output(easyocr_text)
+
+        return easyocr_text
+
+    def _handle_extraction_error(self, error: Exception, image_path: str) -> str:
+        """Handle extraction errors with fallback mechanisms"""
+        logger.error(f"Error in quality-based OCR extraction for {image_path}: {str(error)}")
+
+        if self.debug_ocr:
+            self._log_error_handling(error)
+
+        # Check if this is the EasyOCR library bug
+        if isinstance(error, TextExtractionError) and "EasyOCR library bug" in str(error):
+            logger.warning(f"EasyOCR library bug detected, attempting Vision OCR fallback for {image_path}")
+            try:
+                return self._extract_vision_text(image_path)
+            except Exception as vision_error:
+                logger.error(f"Vision OCR fallback also failed for {image_path}: {str(vision_error)}")
+                if self.debug_ocr:
+                    self._log_catastrophic_failure(error, vision_error)
+                raise TextExtractionError(f"All OCR methods failed for {image_path}. EasyOCR bug: {str(error)}, Vision error: {str(vision_error)}")
+        else:
+            # Standard fallback to basic EasyOCR without quality scoring
             try:
                 return self._extract_easyocr_text(image_path)
             except Exception as fallback_error:
                 logger.error(f"Fallback EasyOCR also failed for {image_path}: {str(fallback_error)}")
 
-                # Debug catastrophic failure
                 if self.debug_ocr:
-                    print(f"\n--- CATASTROPHIC FAILURE ---")
-                    print(f"Both EasyOCR and fallback failed")
-                    print(f"Primary Error: {str(e)}")
-                    print(f"Fallback Error: {str(fallback_error)}")
-                    print(f"{'='*60}\n")
+                    self._log_catastrophic_failure(error, fallback_error)
 
-                raise
+                # Final fallback to Vision OCR
+                try:
+                    logger.warning(f"Attempting final Vision OCR fallback for {image_path}")
+                    return self._extract_vision_text(image_path)
+                except Exception as vision_error:
+                    logger.error(f"Final Vision OCR fallback also failed for {image_path}: {str(vision_error)}")
+                    raise TextExtractionError(f"All OCR methods failed for {image_path}. Primary error: {str(error)}, EasyOCR fallback: {str(fallback_error)}, Vision fallback: {str(vision_error)}")
 
     def _extract_with_comparison(self, image_path: str) -> str:
         """Extract text using both EasyOCR and OpenAI Vision for comparison"""
@@ -241,8 +288,8 @@ class OCRService:
             # Get OpenAI Vision result
             vision_result = self._extract_vision_text(image_path)
 
-            # Print comparison
-            self._print_comparison(image_path, easyocr_result, vision_result)
+            # Log comparison results
+            self._log_comparison(image_path, easyocr_result, vision_result)
 
             # Return EasyOCR result for normal operation
             return easyocr_result
@@ -286,42 +333,42 @@ class OCRService:
             logger.error(f"OpenAI Vision API error for {image_path}: {str(e)}")
             return f"Vision OCR Error: {str(e)}"
 
-    def _print_comparison(self, image_path: str, easyocr_text: str, vision_text: str):
-        """Print comparison between EasyOCR and OpenAI Vision results"""
-        print(f"\n{'='*80}")
-        print(f"OCR COMPARISON: {image_path}")
-        print(f"{'='*80}")
+    def _log_comparison(self, image_path: str, easyocr_text: str, vision_text: str):
+        """Log comparison between EasyOCR and OpenAI Vision results"""
+        logger.info("="*80)
+        logger.info(f"OCR COMPARISON: {image_path}")
+        logger.info("="*80)
 
-        print(f"\n{'-'*60}")
-        print("EASYOCR RESULT:")
-        print(f"{'-'*60}")
-        print(f"Length: {len(easyocr_text)} characters")
-        print(f"Text:\n{easyocr_text}")
+        logger.info("-"*60)
+        logger.info("EASYOCR RESULT:")
+        logger.info("-"*60)
+        logger.info(f"Length: {len(easyocr_text)} characters")
+        logger.info(f"Text:\n{easyocr_text}")
 
-        print(f"\n{'-'*60}")
-        print("OPENAI VISION RESULT:")
-        print(f"{'-'*60}")
-        print(f"Length: {len(vision_text)} characters")
-        print(f"Text:\n{vision_text}")
+        logger.info("-"*60)
+        logger.info("OPENAI VISION RESULT:")
+        logger.info("-"*60)
+        logger.info(f"Length: {len(vision_text)} characters")
+        logger.info(f"Text:\n{vision_text}")
 
-        print(f"\n{'-'*60}")
-        print("COMPARISON SUMMARY:")
-        print(f"{'-'*60}")
-        print(f"EasyOCR length:  {len(easyocr_text)} chars")
-        print(f"Vision length:  {len(vision_text)} chars")
-        print(f"Length diff:    {len(easyocr_text) - len(vision_text)} chars")
+        logger.info("-"*60)
+        logger.info("COMPARISON SUMMARY:")
+        logger.info("-"*60)
+        logger.info(f"EasyOCR length:  {len(easyocr_text)} chars")
+        logger.info(f"Vision length:  {len(vision_text)} chars")
+        logger.info(f"Length diff:    {len(easyocr_text) - len(vision_text)} chars")
 
         # Calculate word overlap
         easyocr_words = set(easyocr_text.lower().split())
         vision_words = set(vision_text.lower().split())
         common_words = easyocr_words.intersection(vision_words)
 
-        print(f"EasyOCR words:  {len(easyocr_words)}")
-        print(f"Vision words:   {len(vision_words)}")
-        print(f"Common words:   {len(common_words)}")
-        print(f"Word overlap:   {len(common_words) / max(len(easyocr_words), len(vision_words)) * 100:.1f}%")
+        logger.info(f"EasyOCR words:  {len(easyocr_words)}")
+        logger.info(f"Vision words:   {len(vision_words)}")
+        logger.info(f"Common words:   {len(common_words)}")
+        logger.info(f"Word overlap:   {len(common_words) / max(len(easyocr_words), len(vision_words)) * 100:.1f}%")
 
-        print(f"\n{'='*80}\n")
+        logger.info("="*80)
 
     def _preprocess_image(self, image_path: str) -> dict:
         """Preprocess image for EasyOCR"""
@@ -333,6 +380,9 @@ class OCRService:
             try:
                 image = Image.open(image_path)
                 image.verify()  # Verify image integrity
+
+                # Re-open image after verify (PIL requirement)
+                image = Image.open(image_path)
             except (IOError, OSError) as e:
                 raise ImageProcessingError(f"Invalid or corrupted image file: {image_path} - {str(e)}")
 
@@ -346,6 +396,17 @@ class OCRService:
             # Convert to numpy array for EasyOCR
             try:
                 image_array = np.array(image)
+
+                # Defensive validation of image array
+                if image_array is None or not isinstance(image_array, np.ndarray):
+                    raise ImageProcessingError("Invalid image array")
+
+                if image_array.size == 0:
+                    raise ImageProcessingError("Empty image array")
+
+                # Debug logging after preprocessing
+                logger.debug(f"Preprocessed image shape: {image_array.shape}, dtype: {image_array.dtype}")
+
             except Exception as e:
                 raise ImageProcessingError(f"Failed to convert image to array: {image_path} - {str(e)}")
 
@@ -363,7 +424,7 @@ class OCRService:
             # Catch any unexpected errors and wrap them
             raise ImageProcessingError(f"Unexpected error preprocessing image {image_path}: {str(e)}")
 
-def _extract_easyocr_text(self, image_input: Any) -> str:
+    def _extract_easyocr_text(self, image_input: Any) -> str:
         """Extract text using EasyOCR"""
         if isinstance(image_input, str):
             # If it's a string path, preprocess first
@@ -371,133 +432,22 @@ def _extract_easyocr_text(self, image_input: Any) -> str:
         else:
             processed = image_input
 
-        try:
-            # Run EasyOCR
-            results = self.ocr.readtext(processed['image_array'])
+        # Validate processed data before OCR
+        if not isinstance(processed, dict):
+            raise TextExtractionError("Invalid processed data format: expected dictionary")
 
-            # Debug: Log raw OCR output
-            if self.debug:
-                logger.debug(f"RAW OCR OUTPUT for {processed['image_path']}:")
-                for i, (bbox, text, confidence) in enumerate(results):
-                    logger.debug(f"  {i+1:2d}. [{confidence:.3f}] {text[:50]}{'...' if len(text) > 50 else ''}")
+        if 'image_array' not in processed:
+            raise TextExtractionError("Missing 'image_array' in processed data")
 
-            # Extract and combine text from results
-            text_lines = []
-            confidence_scores = []
+        if not isinstance(processed['image_array'], np.ndarray):
+            raise TextExtractionError("Invalid image_array type: expected numpy array")
 
-            if results:  # Check if OCR found any text
-                for (bbox, text, confidence) in results:
-                    if text and confidence >= self.confidence_threshold:  # Filter by configurable threshold
-                        text_lines.append(text.strip())
-                        confidence_scores.append(confidence)
+        if processed['image_array'].size == 0:
+            raise TextExtractionError("Empty image array provided")
 
-            # Combine text with proper spacing and layout preservation
-            extracted_text = self._combine_text_lines(text_lines, results)
-
-            # Debug: Log filtered output
-            if self.debug:
-                logger.debug(f"FILTERED OUTPUT for {processed['image_path']} (threshold: {self.confidence_threshold}):")
-                for i, line in enumerate(text_lines):
-                    logger.debug(f"  {i+1:2d}. {line[:50]}{'...' if len(line) > 50 else ''}")
-                logger.debug(f"Combined text length: {len(extracted_text)} characters")
-
-            # Apply text normalization
-            normalized_text = self._normalize_text(extracted_text)
-
-            # Debug: Log final normalized text
-            if self.debug:
-                logger.debug(f"FINAL NORMALIZED TEXT for {processed['image_path']}:")
-                logger.debug(f"  Length: {len(normalized_text)} characters")
-                logger.debug(f"  Preview: {normalized_text[:200]}{'...' if len(normalized_text) > 200 else ''}")
-
-            # Log extraction results
-            avg_confidence = np.mean(confidence_scores) if confidence_scores else 0
-            logger.info(f"Extracted {len(normalized_text)} characters from {processed['image_path']} "
-                       f"(avg confidence: {avg_confidence:.2f})")
-
-            return normalized_text
-
-        except easyocr.EasyOCRError as e:
-            raise TextExtractionError(f"EasyOCR engine failed for {processed['image_path']}: {str(e)}")
-        except Exception as e:
-            raise TextExtractionError(f"Unexpected error during OCR extraction for {processed['image_path']}: {str(e)}")
-
-def _combine_text_lines(self, text_lines: List[str], ocr_results: List) -> str:
-    """Combine OCR text lines preserving layout structure with line reconstruction"""
-    if not text_lines or not ocr_results:
-        return ""
-
-    # Create list of (y_coord, x_coord, text) for filtered results
-    filtered_items = []
-
-    # Map text_lines to their corresponding OCR results
-    text_index = 0
-    for bbox, text, confidence in ocr_results:
-        # Only include results that passed the confidence filter
-        if text and confidence >= self.confidence_threshold and text_index < len(text_lines):
-            # Use top-left corner coordinates
-            y_coord = bbox[0][1] if bbox else 0
-            x_coord = bbox[0][0] if bbox else 0
-
-            filtered_items.append({
-                'y_coord': y_coord,
-                'x_coord': x_coord,
-                'text': text_lines[text_index],
-                'bbox': bbox
-            })
-            text_index += 1
-
-    # Group items into lines based on Y-coordinate proximity
-    lines = self._group_into_lines(filtered_items)
-
-    # Sort lines by Y-coordinate (top-to-bottom)
-    lines.sort(key=lambda line: line['y_coord'])
-
-    # Extract text from each line
-    reconstructed_lines = []
-    for line in lines:
-        # Sort items within line by X-coordinate (left-to-right)
-        line['items'].sort(key=lambda item: item['x_coord'])
-
-        # Combine items on the same line with spaces
-        line_text = ' '.join(item['text'] for item in line['items'])
-        reconstructed_lines.append(line_text)
-
-    # Join lines with newlines to create receipt-like structure
-    combined_text = '\n'.join(reconstructed_lines)
-
-    return combined_text
-
-def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
-    """Group OCR items into lines based on Y-coordinate proximity"""
-    if not items:
-        return []
-
-    # Calculate line height threshold (average height * 0.5)
-    heights = []
-    for item in items:
-        bbox = item['bbox']
-        if bbox and len(bbox) >= 2:
-            height = abs(bbox[0][1] - bbox[2][1])  # Difference between top-left and bottom-left Y
-            heights.append(height)
-
-    avg_height = np.mean(heights) if heights else 20
-    line_threshold = avg_height * 0.5  # Items within 50% of average height are on same line
-
-    # Group items into lines
-    lines = []
-    current_line = None
-
-    for item in sorted(items, key=lambda x: x['y_coord']):
-        if current_line is None:
-            # Start first line
-            current_line = {
-                'y_coord': item['y_coord'],
-                'items': [item]
-            }
-            processed = self._preprocess_image(image_input)
-        else:
-            processed = image_input
+        # Early failure guard before EasyOCR call
+        if processed['image_array'] is None or processed['image_array'].size == 0:
+            raise TextExtractionError("Invalid preprocessed image")
 
         try:
             # Run EasyOCR
@@ -546,8 +496,10 @@ def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
             return normalized_text
 
         except Exception as e:
-            logger.error(f"EasyOCR error for {processed['image_path']}: {str(e)}")
-            raise
+            # Handle any OCR processing errors with proper context
+            image_path = processed.get('image_path', 'unknown')
+            logger.exception(f"OCR extraction failed for {image_path}")
+            raise TextExtractionError(f"OCR processing failed for {image_path}: {str(e)}") from e
 
     def _combine_text_lines(self, text_lines: List[str], ocr_results: List) -> str:
         """Combine OCR text lines preserving layout structure with line reconstruction"""
@@ -574,7 +526,7 @@ def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
                 })
                 text_index += 1
 
-        # Group items into lines based on Y-coordinate proximity
+    # Group items into lines based on Y-coordinate proximity
         lines = self._group_into_lines(filtered_items)
 
         # Sort lines by Y-coordinate (top-to-bottom)
@@ -645,27 +597,21 @@ def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
         return lines
 
     def _normalize_text(self, text: str) -> str:
-        """Apply context-aware text normalization for better parsing"""
+        """Apply conservative text normalization that preserves readability"""
         if not text:
             return ""
 
-        # Remove excessive whitespace first
-        text = re.sub(r'\s+', ' ', text)
+        # Remove excessive whitespace but preserve line breaks for structure
+        text = re.sub(r'[ \t]+', ' ', text)  # Only normalize spaces and tabs
+        text = re.sub(r'\n\s*\n', '\n', text)  # Remove excessive blank lines
 
-        # Apply context-aware character corrections
+        # Apply conservative character corrections (only obvious OCR errors)
         text = self._fix_character_errors(text)
 
-        # Clean up special characters but keep important ones
-        text = re.sub(r'[^\w\s$.,%\-:\/\n]', '', text)
+        # Apply minimal receipt-specific fixes (only clear OCR errors)
+        text = self._fix_receipt_patterns(text)
 
-        # Ensure proper spacing around punctuation
-        text = re.sub(r'([.,%])', r' \1 ', text)
-        text = re.sub(r'\s+', ' ', text)
-
-        # Strip leading/trailing whitespace
-        text = text.strip()
-
-        return text
+        return text.strip()
 
     def _fix_character_errors(self, text: str) -> str:
         """Fix common OCR character errors using context-aware heuristics"""
@@ -684,22 +630,20 @@ def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
         if not word:
             return word
 
-        # Remove punctuation for analysis, but preserve it for reconstruction
+        # Extract prefix/suffix punctuation
         prefix_punct = ''
         suffix_punct = ''
         clean_word = word
 
-        # Extract leading punctuation
-        while clean_word and not clean_word[0].isalnum():
-            prefix_punct += clean_word[0]
-            clean_word = clean_word[1:]
-
-        # Extract trailing punctuation
-        while clean_word and not clean_word[-1].isalnum():
-            suffix_punct = clean_word[-1] + suffix_punct
+        # Handle common punctuation patterns
+        if word and word[0] in '.,;:!?()[]{}"\'':
+            prefix_punct = word[0]
+            clean_word = word[1:]
+        if clean_word and clean_word[-1] in '.,;:!?()[]{}"\'':
+            suffix_punct = clean_word[-1]
             clean_word = clean_word[:-1]
 
-        # Apply context-aware corrections to the clean word
+        # Apply generalized character corrections based on context
         corrected_clean_word = self._apply_context_corrections(clean_word)
 
         # Reconstruct word with original punctuation
@@ -712,252 +656,173 @@ def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
 
         corrected = word
 
-        # Rule 1: Fix 0/O confusion based on context
-        # If word is mostly numeric, O should be 0
-        # If word is mostly alphabetic, 0 should be O
-        digit_count = sum(1 for c in word if c.isdigit())
-        alpha_count = sum(1 for c in word if c.isalpha())
-
-        if digit_count > alpha_count and len(word) > 1:
-            # Mostly numeric - replace O with 0
-            corrected = corrected.replace('O', '0')
-        elif alpha_count > digit_count:
-            # Mostly alphabetic - replace 0 with O
-            corrected = corrected.replace('0', 'O')
-
-        # Rule 2: Fix l/1/I confusion in numeric contexts
-        if digit_count > alpha_count:
-            # Numeric context - replace l and I with 1
-            corrected = corrected.replace('l', '1').replace('I', '1')
-        elif alpha_count > digit_count:
-            # Alphabetic context - replace 1 with l (more common than I in words)
-            corrected = corrected.replace('1', 'l')
-
-        # Rule 3: Fix S/$ confusion based on money context
-        # Use heuristics to detect money amounts
-        if self._is_money_context(word):
-            # Money context - S should be $
-            corrected = corrected.replace('S', '$').replace('s', '$')
-        elif self._looks_like_money_amount(word):
-            # Money amount context - S should be $
-            corrected = corrected.replace('S', '$').replace('s', '$')
-        else:
-            # Non-money context - $ should be S
-            corrected = corrected.replace('$', 'S')
-
-        # Rule 4: Specific receipt word corrections
-        corrected = self._fix_receipt_words(corrected)
+        # Apply generalized character corrections without hardcoded mappings
+        corrected = self._apply_generalized_corrections(word)
 
         return corrected
 
-    def _is_money_context(self, word: str) -> bool:
-        """Check if word is in a money context"""
-        money_indicators = ['$', 'price', 'cost', 'total', 'amount', 'pay', 'cash', 'card', 'debit', 'credit']
-        return any(indicator in word.lower() for indicator in money_indicators)
-
-    def _looks_like_money_amount(self, word: str) -> bool:
-        """Check if word looks like a money amount"""
-        # Pattern: digits with optional decimal, possibly with S/$ prefix
-        money_pattern = r'^[S$]?\d+\.?\d*$'
-        return bool(re.match(money_pattern, word))
-
-    def _fix_receipt_words(self, word: str) -> str:
-        """Apply generalized context-aware normalization to receipt words"""
+    def _apply_generalized_corrections(self, word: str) -> str:
+        """Apply generalized character corrections using pattern matching"""
         if not word:
             return word
 
-        # Apply generalized character corrections based on context
-        return self._apply_generalized_corrections(word)
-
-    def _apply_generalized_corrections(self, word: str) -> str:
-        """Apply context-aware character corrections without hardcoded mappings"""
         corrected = word
 
-        # 1. Fix common OCR character confusions based on word context
+        # Fix common character confusions
         corrected = self._fix_character_confusions(corrected)
 
-        # 2. Fix price formatting issues
+        # Fix price formatting issues
         corrected = self._fix_price_formatting(corrected)
-
-        # 3. Fix common receipt-specific patterns using regex
-        corrected = self._fix_receipt_patterns(corrected)
 
         return corrected
 
     def _fix_character_confusions(self, word: str) -> str:
-        """Fix character confusions based on word analysis"""
+        """Fix common OCR character confusions using conservative pattern matching"""
+        if not word:
+            return word
+
         corrected = word
 
-        # Count character types for context analysis
-        digit_count = sum(1 for c in word if c.isdigit())
-        alpha_count = sum(1 for c in word if c.isalpha())
-        special_count = len(word) - digit_count - alpha_count
+        # Only apply substitutions in clearly numeric contexts
+        # Pattern 1: Word is primarily numeric (e.g., "12345", "$12.99")
+        if re.match(r'^[\$]?\d+[\.,]?\d*$', word):
+            # Apply conservative substitutions only for obvious OCR errors
+            substitutions = {
+                'O': '0',  # Letter O to number 0
+                'I': '1',  # Letter I to number 1
+                'S': '5',  # Letter S to number 5 - only in pure numeric context
+            }
+            for old_char, new_char in substitutions.items():
+                corrected = corrected.replace(old_char, new_char)
 
-        # Apply corrections based on character composition
-        if digit_count > alpha_count and len(word) > 1:
-            # Mostly numeric - fix alphabetic characters that should be digits
-            corrected = corrected.replace('O', '0')
-            corrected = corrected.replace('I', '1')
-            corrected = corrected.replace('l', '1')
-        elif alpha_count > digit_count:
-            # Mostly alphabetic - fix numeric characters that should be letters
-            corrected = corrected.replace('0', 'O')
-            corrected = corrected.replace('1', 'l')
-        elif special_count > 0:
-            # Mixed characters - be more conservative
-            if 'S' in word and '$' not in word and digit_count > 0:
-                # Likely money context where S should be $
-                corrected = corrected.replace('S', '$')
-            elif '$' in word and digit_count == 0:
-                # Non-money context where $ should be S
-                corrected = corrected.replace('$', 'S')
+        # Pattern 2: Word contains clear price/amount patterns
+        elif re.search(r'\$\d+[\.,]\d{2}|\d+[\.,]\d{2}\$', word):
+            # Apply substitutions only to numeric parts
+            numeric_part = re.sub(r'[^\d.,$]', '', word)
+            if numeric_part:
+                substitutions = {
+                    'O': '0',
+                    'I': '1',
+                    'S': '5',
+                }
+                for old_char, new_char in substitutions.items():
+                    corrected = corrected.replace(old_char, new_char)
 
         return corrected
 
     def _fix_price_formatting(self, word: str) -> str:
-        """Fix common price formatting issues using regex"""
+        """Fix common price formatting issues in OCR text"""
+        if not word:
+            return word
+
+        corrected = word
+
         # Fix space-separated decimals (e.g., "6 . 49" -> "6.49")
-        space_decimal_pattern = r'(\d+)\s+\.\s+(\d{2})'
-        corrected = re.sub(space_decimal_pattern, r'\1.\2', word)
+        if re.search(r'\d+\s+\.\s+\d{2}', corrected):
+            corrected = re.sub(r'(\d+)\s+\.\s+(\d{2})', r'\1.\2', corrected)
 
-        # Fix comma decimal separators (e.g., "37,83" -> "37.83") in money context
-        if '$' in word or any(money_word in word.lower() for money_word in ['total', 'amount', 'price', 'cost']):
-            comma_decimal_pattern = r'(\d+),(\d{2})'
-            corrected = re.sub(comma_decimal_pattern, r'\1.\2', corrected)
-
-        # Fix missing decimal points in price-like patterns
-        price_pattern = r'^\$?(\d+)(\d{2})$'
-        if re.match(price_pattern, corrected):
-            corrected = re.sub(price_pattern, r'$\1.\2', corrected)
+        # Fix comma decimals (e.g., "6,49" -> "6.49")
+        if re.search(r'\d+,\d{2}', corrected):
+            corrected = corrected.replace(',', '.')
 
         return corrected
 
-    def _fix_receipt_patterns(self, word: str) -> str:
-        """Fix common receipt patterns using regex-based approaches"""
-        # Fix common OCR errors in receipt terminology
-        patterns = [
-            # Common number/letter substitutions in receipt contexts
-            (r'GR[0O]CERY', 'GROCERY'),
-            (r'PR[0O]DUCE', 'PRODUCE'),
-            (r'L[1I]QU[0O]R', 'LIQUOR'),
-            (r'T[0O]TAL', 'TOTAL'),
-            (r'AM[0O]UNT', 'AMOUNT'),
-            (r'CA$H', 'CASH'),
-            (r'PURCHA$E', 'PURCHASE'),
-            (r'PR[1I]MARY', 'PRIMARY'),
-            (r'DEB[1I]', 'DEBI'),
+    def _fix_receipt_patterns(self, text: str) -> str:
+        """Fix common receipt-specific patterns and formatting issues"""
+        if not text:
+            return text
 
-            # Fix common packaging/quantity indicators
-            (r'BLACKGPK', 'BLACK 6PK'),
-            (r'(\d+)PK', r'\1 PK'),
+        corrected = text
 
-            # Fix common separator issues
-            (r'\s+\.\s+', '.'),  # Space around decimal points
-            (r'\s+\,\s+', ','),  # Space around commas
-
-            # Fix currency symbol placement
-            (r'(\d+)\s+\$', r'$\1'),
-            (r'\$\s+(\d+)', r'$\1'),
+        # Fix common OCR errors in receipt text
+        corrections = [
+            # Common character substitutions
+            (r'\bT0TAL\b', 'TOTAL'),
+            (r'\bAM0UNT\b', 'AMOUNT'),
+            (r'\bSUBT0TAL\b', 'SUBTOTAL'),
+            (r'\bCASHIER\b', 'CASHIER'),
+            (r'\bCUST0MER\b', 'CUSTOMER'),
         ]
 
-        corrected = word
-        for pattern, replacement in patterns:
+        for pattern, replacement in corrections:
             corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
 
         return corrected
 
-    def get_ocr_confidence(self, image_path: str) -> float:
-        """Get average confidence score for OCR extraction"""
-        try:
-            processed = self._preprocess_image(image_path)
-            results = self.ocr.readtext(processed['image_array'])
-
-            confidence_scores = []
-            if results:
-                for (bbox, text, confidence) in results:
-                    if text and confidence > 0:
-                        confidence_scores.append(confidence)
-
-            return np.mean(confidence_scores) if confidence_scores else 0.0
-
-        except Exception as e:
-            logger.error(f"Error getting OCR confidence for {image_path}: {str(e)}")
+    def get_ocr_confidence(self, text: str) -> float:
+        """Calculate overall OCR confidence score"""
+        if not text:
             return 0.0
 
+        # Use the quality scoring system to determine confidence
+        quality_score = self.score_ocr_quality(text)
+
+        # Convert quality score (0-1) to confidence percentage (0-100)
+        confidence = quality_score * 100.0
+
+        return confidence
+
     def extract_text_with_confidence(self, image_path: str) -> Dict[str, Any]:
-        """Extract text with detailed confidence information"""
+        """Extract text from image with confidence scoring"""
         try:
-            processed = self._preprocess_image(image_path)
-            results = self.ocr.readtext(processed['image_array'])
+            # Extract text using EasyOCR
+            extracted_text = self.extract_text(image_path)
 
-            text_lines = []
-            confidence_scores = []
-            detailed_results = []
-
-            if results:
-                for (bbox, text, confidence) in results:
-                    if text and confidence >= self.confidence_threshold:
-                        text_lines.append(text.strip())
-                        confidence_scores.append(confidence)
-
-                        detailed_results.append({
-                            'text': text.strip(),
-                            'confidence': confidence,
-                            'bbox': bbox
-                        })
-
-            # Combine and normalize text
-            combined_text = self._combine_text_lines(text_lines, results)
-            normalized_text = self._normalize_text(combined_text)
-
-            avg_confidence = np.mean(confidence_scores) if confidence_scores else 0
+            # Calculate confidence score
+            confidence = self.get_ocr_confidence(extracted_text)
 
             return {
-                'text': normalized_text,
-                'raw_text': combined_text,
-                'average_confidence': avg_confidence,
-                'line_count': len(text_lines),
-                'detailed_results': detailed_results
+                'text': extracted_text,
+                'confidence': confidence,
+                'method': 'easyocr',
+                'success': True
             }
 
         except Exception as e:
-            logger.error(f"Error in extract_text_with_confidence for {image_path}: {str(e)}")
-            raise
+            logger.error(f"Error extracting text with confidence: {str(e)}")
+            return {
+                'text': '',
+                'confidence': 0.0,
+                'method': 'easyocr',
+                'success': False,
+                'error': str(e)
+            }
 
-    def extract_receipt_fields(self, ocr_text: str) -> Dict[str, Any]:
-        """Extract key receipt fields from OCR text using regex-based heuristics"""
-        if not ocr_text:
+    def extract_receipt_fields(self, text: str) -> Dict[str, Any]:
+        """Extract structured receipt fields from OCR text"""
+        if not text:
             return {
                 'total_amount': None,
                 'items': [],
                 'merchant_name': None,
                 'date': None,
-                'raw_text': ocr_text
+                'confidence': 0.0
             }
 
-        # Extract structured fields
-        total_amount = self._extract_total_amount(ocr_text)
-        items = self._extract_items(ocr_text)
-        merchant_name = self._extract_merchant_name(ocr_text)
-        date = self._extract_date(ocr_text)
+        # Extract various fields
+        total_amount = self._extract_total_amount(text)
+        items = self._extract_items(text)
+        merchant_name = self._extract_merchant_name(text)
+        date = self._extract_date(text)
+
+        # Calculate overall confidence
+        confidence = self._calculate_extraction_confidence(total_amount, items)
 
         return {
             'total_amount': total_amount,
             'items': items,
             'merchant_name': merchant_name,
             'date': date,
-            'raw_text': ocr_text,
-            'extraction_confidence': self._calculate_extraction_confidence(total_amount, items)
+            'confidence': confidence
         }
 
     def _extract_total_amount(self, text: str) -> Optional[float]:
-        """Extract total amount using regex patterns"""
-        # Pattern 1: TOTAL followed by amount (handle comma decimal format)
+        """Extract total amount from receipt text"""
+        # Pattern 1: Look for TOTAL followed by amount
         total_patterns = [
-            r'TOTAL\s*AMOUNT\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
             r'TOTAL\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
-            r'TOTAL\s*TRANSACTION\s*AMOUNT\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
-            r'GRAND\s*TOTAL\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'AMOUNT\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
+            r'GRAND\s+TOTAL\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
             r'SUBTOTAL\s*[:\-]?\s*\$?(\d+(?:,\d{3})*(?:[,.]\d{2})?)',
         ]
 
@@ -1174,6 +1039,11 @@ def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
                         'total_keyword': 20.0,
                         'word_quality': 25.0,
                         'noise_penalty': 10.0
+                    },
+                    'text_stats': {
+                        'length': len(text),
+                        'word_count': len(text.split()),
+                        'line_count': len(text.split('\n'))
                     }
                 }
             return 0.0
@@ -1230,286 +1100,88 @@ def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
 
         return final_score
 
+    def _score_text_length(self, text: str) -> float:
+        """Score text length (0-20 points)"""
+        return min(len(text) / 10, 20)
+
+    def _score_price_patterns(self, text: str) -> float:
+        """Score price patterns (0-25 points)"""
+        price_patterns = r'\$?\d+\.\d{2}'
+        price_matches = len(re.findall(price_patterns, text))
+        return min(price_matches * 5, 25)
+
+    def _score_total_keyword(self, text: str) -> float:
+        """Score total keywords (0-20 points)"""
+        total_keywords = ['total', 'amount', 'sum', 'subtotal']
+        total_count = sum(1 for keyword in total_keywords if keyword.lower() in text.lower())
+        return min(total_count * 5, 20)
+
+    def _score_word_quality(self, text: str) -> float:
+        """Score word quality (0-25 points)"""
+        words = text.split()
+        valid_words = sum(1 for word in words if self._is_likely_valid_word(word))
+        return (valid_words / len(words) * 25) if words else 0
+
+    def _calculate_noise_penalty(self, text: str) -> float:
+        """Calculate noise penalty (0-10 points)"""
+        noise_chars = len(re.findall(r'[^\w\s$.,%\-:\/\n]', text))
+        return min(noise_chars / 5, 10)
+
+    def _is_likely_valid_word(self, word: str) -> bool:
+        """Simple heuristic to check if a word is likely valid"""
+        # This is a simplified check - in practice, you might use a dictionary
+        # or more sophisticated language model
+        return len(word) > 1 and not word.isdigit()
+
     def _print_scoring_debug(self, text: str, length_score: float, price_score: float,
                            total_score: float, word_quality_score: float,
                            noise_penalty: float, final_score: float):
         """Print detailed scoring breakdown for debugging"""
-        print(f"\n{'='*50}")
-        print(f"OCR QUALITY SCORING BREAKDOWN")
-        print(f"{'='*50}")
-        print(f"Text Length: {len(text)} characters")
-        print(f"Word Count: {len(text.split())} words")
-        print(f"Line Count: {len(text.split('\n'))} lines")
-        print(f"Text Preview: {text[:100]}{'...' if len(text) > 100 else ''}")
+        logger.debug("=== OCR QUALITY SCORING DEBUG ===")
+        logger.debug(f"Text length: {len(text)} chars")
+        logger.debug(f"Length score: {length_score:.1f}/20")
+        logger.debug(f"Price patterns score: {price_score:.1f}/25")
+        logger.debug(f"Total keyword score: {total_score:.1f}/20")
+        logger.debug(f"Word quality score: {word_quality_score:.1f}/25")
+        logger.debug(f"Noise penalty: -{noise_penalty:.1f}/10")
+        logger.debug(f"Raw total: {length_score + price_score + total_score + word_quality_score - noise_penalty:.1f}/100")
+        logger.debug(f"Final score: {final_score:.3f}")
+        logger.debug("================================")
 
-        print(f"\n--- COMPONENT SCORES ---")
-        print(f"Text Length: {length_score:.1f}/20.0 ({length_score/20.0*100:.1f}%)")
-        print(f"Price Patterns: {price_score:.1f}/25.0 ({price_score/25.0*100:.1f}%)")
-        print(f"Total Keywords: {total_score:.1f}/20.0 ({total_score/20.0*100:.1f}%)")
-        print(f"Word Quality: {word_quality_score:.1f}/25.0 ({word_quality_score/25.0*100:.1f}%)")
-        print(f"Noise Penalty: -{noise_penalty:.1f}/10.0 ({noise_penalty/10.0*100:.1f}%)")
-
-        raw_total = length_score + price_score + total_score + word_quality_score - noise_penalty
-        print(f"\n--- TOTAL SCORE ---")
-        print(f"Raw Total: {raw_total:.1f}/100.0")
-        print(f"Final Score: {final_score:.3f} ({final_score*100:.1f}%)")
-        print(f"{'='*50}\n")
-
-    def _score_text_length(self, text: str) -> float:
-        """
-        Score text length (0-20 points).
-        Longer text generally indicates better OCR capture.
-        """
-        length = len(text.strip())
-
-        if length < 50:
-            return 0.0  # Very short text
-        elif length < 100:
-            return 5.0  # Short text
-        elif length < 200:
-            return 10.0  # Moderate text
-        elif length < 400:
-            return 15.0  # Good length
-        else:
-            return 20.0  # Excellent length
-
-    def _score_price_patterns(self, text: str) -> float:
-        """
-        Score price pattern presence (0-25 points).
-        More price patterns indicate better receipt OCR quality.
-        """
-        # Regex patterns for prices
-        price_patterns = [
-            r'\$\d+(?:\.\d{2})?',  # $12.99
-            r'\d+\.\d{2}',  # 12.99
-            r'\d+\s+\.\s+\d{2}',  # 6 . 49 (space-separated)
-            r'\d+,\d{2}',  # 12,99 (comma decimal)
-        ]
-
-        total_price_matches = 0
-        for pattern in price_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            total_price_matches += len(matches)
-
-        # Score based on number of price matches
-        if total_price_matches == 0:
-            return 0.0
-        elif total_price_matches <= 2:
-            return 10.0
-        elif total_price_matches <= 5:
-            return 15.0
-        elif total_price_matches <= 10:
-            return 20.0
-        else:
-            return 25.0
-
-    def _score_total_keyword(self, text: str) -> float:
-        """
-        Score TOTAL keyword presence (0-20 points).
-        Presence of TOTAL indicates complete receipt capture.
-        """
-        total_patterns = [
-            r'\bTOTAL\b',
-            r'\bTOTAL\s+AMOUNT\b',
-            r'\bGRAND\s+TOTAL\b',
-            r'\bSUBTOTAL\b',
-            r'\bBALANCE\b',
-        ]
-
-        total_matches = 0
-        for pattern in total_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                total_matches += 1
-
-        # Score based on presence of total-related keywords
-        if total_matches == 0:
-            return 0.0
-        elif total_matches == 1:
-            return 12.0
-        elif total_matches == 2:
-            return 16.0
-        else:
-            return 20.0
-
-    def _score_word_quality(self, text: str) -> float:
-        """
-        Score word quality based on valid words vs noisy tokens (0-25 points).
-        Higher ratio of valid words indicates better OCR quality.
-        """
-        # Split into tokens
-        tokens = re.findall(r'\b\w+\b', text)
-
-        if not tokens:
-            return 0.0
-
-        valid_word_count = 0
-        noise_word_count = 0
-
-        # Common receipt-related valid words
-        valid_receipt_words = {
-            'TOTAL', 'AMOUNT', 'BALANCE', 'CASH', 'CARD', 'DEBIT', 'CREDIT',
-            'GROCERY', 'PRODUCE', 'DAIRY', 'BAKERY', 'MEAT', 'FROZEN',
-            'TAX', 'TIP', 'CHANGE', 'PURCHASE', 'PAYMENT', 'TRANSACTION',
-            'RECEIPT', 'STORE', 'MARKET', 'SHOP', 'PHARMACY', 'GAS',
-            'QUANTITY', 'PRICE', 'COST', 'SUBTOTAL', 'DISCOUNT', 'COUPON',
-            'CASHIER', 'CLERK', 'CUSTOMER', 'THANK', 'YOU', 'WELCOME'
-        }
-
-        for token in tokens:
-            token_upper = token.upper()
-
-            # Check if it's a valid receipt word
-            if token_upper in valid_receipt_words:
-                valid_word_count += 1
-            # Check if it's a number (likely price/quantity)
-            elif re.match(r'^\d+(?:\.\d{2})?$', token):
-                valid_word_count += 1
-            # Check if it's a common English word (3+ letters)
-            elif len(token) >= 3 and token.isalpha():
-                valid_word_count += 1
-            else:
-                # Likely noise (short tokens, special chars, etc.)
-                noise_word_count += 1
-
-        total_tokens = valid_word_count + noise_word_count
-        if total_tokens == 0:
-            return 0.0
-
-        valid_ratio = valid_word_count / total_tokens
-
-        # Score based on valid word ratio
-        if valid_ratio >= 0.8:
-            return 25.0
-        elif valid_ratio >= 0.6:
-            return 20.0
-        elif valid_ratio >= 0.4:
-            return 15.0
-        elif valid_ratio >= 0.2:
-            return 10.0
-        else:
-            return 5.0
-
-    def _calculate_noise_penalty(self, text: str) -> float:
-        """
-        Calculate penalty for excessive symbols/noise (0-10 points deduction).
-        Too many special characters indicate poor OCR quality.
-        """
-        # Count special characters (non-alphanumeric, non-space)
-        special_chars = len(re.findall(r'[^a-zA-Z0-9\s]', text))
-        total_chars = len(text)
-
-        if total_chars == 0:
-            return 10.0
-
-        special_ratio = special_chars / total_chars
-
-        # Calculate penalty based on special character ratio
-        if special_ratio >= 0.3:  # 30%+ special chars
-            return 10.0
-        elif special_ratio >= 0.2:  # 20-30% special chars
-            return 7.5
-        elif special_ratio >= 0.1:  # 10-20% special chars
-            return 5.0
-        elif special_ratio >= 0.05:  # 5-10% special chars
-            return 2.5
-        else:  # Less than 5% special chars
-            return 0.0
-
-    def should_fallback(self, text: str, threshold: float = 0.25) -> bool:
-        """
-        Determine when to fallback to Vision OCR based on quality score.
-
-        Args:
-            text: OCR text to evaluate
-            threshold: Quality threshold below which fallback is recommended (default: 0.25)
-
-        Returns:
-            bool: True if fallback to Vision OCR is needed, False otherwise
-        """
-        if not text or not text.strip():
-            logger.warning("Empty text provided for fallback decision - recommending fallback")
-            return True
-
-        # Calculate OCR quality score
+    def should_fallback(self, text: str, threshold: float) -> bool:
+        """Determine if OCR quality is below threshold and fallback is needed"""
         quality_score = self.score_ocr_quality(text)
+        return quality_score < threshold
 
-        # Log the quality score for debugging
-        logger.info(f"OCR Quality Score: {quality_score:.3f} (threshold: {threshold:.3f})")
-
-        # Make fallback decision
-        should_fallback = quality_score < threshold
-
-        if should_fallback:
-            logger.warning(f"OCR quality below threshold ({quality_score:.3f} < {threshold:.3f}) - recommending fallback to Vision OCR")
-        else:
-            logger.info(f"OCR quality acceptable ({quality_score:.3f} >= {threshold:.3f}) - using EasyOCR result")
-
-        return should_fallback
-
-    def get_fallback_reasoning(self, text: str, threshold: float = 0.25) -> Dict[str, Any]:
-        """
-        Get detailed reasoning for fallback decision.
-
-        Args:
-            text: OCR text to evaluate
-            threshold: Quality threshold for fallback decision
-
-        Returns:
-            Dict containing detailed scoring breakdown and reasoning
-        """
-        if not text or not text.strip():
-            return {
-                'should_fallback': True,
-                'quality_score': 0.0,
-                'threshold': threshold,
-                'reasoning': 'Empty text - automatic fallback recommended',
-                'component_scores': {},
-                'recommendation': 'FALLBACK'
-            }
-
-        # Calculate component scores
-        length_score = self._score_text_length(text)
-        price_score = self._score_price_patterns(text)
-        total_score = self._score_total_keyword(text)
-        word_score = self._score_word_quality(text)
-        noise_penalty = self._calculate_noise_penalty(text)
-        quality_score = self.score_ocr_quality(text)
+    def get_fallback_reasoning(self, text: str, threshold: float) -> Dict[str, Any]:
+        """Get detailed reasoning for fallback decision"""
+        quality_score = self.score_ocr_quality(text, detailed=True)
 
         # Determine reasoning
         reasoning_parts = []
 
-        if length_score < 10:
+        if quality_score['component_scores']['text_length'] < 0.5:
             reasoning_parts.append(f"Text too short ({len(text)} chars)")
 
-        if price_score < 15:
+        if quality_score['component_scores']['price_patterns'] < 0.6:
             reasoning_parts.append("Insufficient price patterns detected")
 
-        if total_score < 12:
+        if quality_score['component_scores']['total_keyword'] < 0.5:
             reasoning_parts.append("Missing TOTAL/AMOUNT keywords")
 
-        if word_score < 15:
+        if quality_score['component_scores']['word_quality'] < 0.6:
             reasoning_parts.append("Low word quality (many noisy tokens)")
 
-        if noise_penalty > 5:
+        if quality_score['component_scores']['noise_penalty'] > 0.5:
             reasoning_parts.append("Excessive special characters/noise")
 
-        # Create recommendation
-        should_fallback = quality_score < threshold
-        recommendation = "FALLBACK" if should_fallback else "USE_EASYOCR"
-
-        reasoning = "; ".join(reasoning_parts) if reasoning_parts else "Good quality OCR"
+        reasoning = "; ".join(reasoning_parts) if reasoning_parts else "General quality concerns"
 
         return {
-            'should_fallback': should_fallback,
-            'quality_score': quality_score,
+            'should_fallback': quality_score['total_score'] < threshold,
+            'quality_score': quality_score['total_score'],
             'threshold': threshold,
             'reasoning': reasoning,
-            'recommendation': recommendation,
-            'component_scores': {
-                'text_length': length_score,
-                'price_patterns': price_score,
-                'total_keyword': total_score,
-                'word_quality': word_score,
-                'noise_penalty': noise_penalty
-            }
+            'component_scores': quality_score['component_scores'],
+            'recommendation': 'FALLBACK' if quality_score['total_score'] < threshold else 'PROCEED'
         }

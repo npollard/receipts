@@ -8,3 +8,5 @@ urllib3<2
 pytest>=8.0.0
 sqlalchemy>=2.0.0,<3.0.0
 psycopg2-binary>=2.9.0,<3.0.0
+easyocr>=1.7.0
+torch>=2.0.0
