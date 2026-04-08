@@ -24,11 +24,9 @@ from config import DATABASE_URL, IS_TEST, app_config
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, app_config.LOG_LEVEL),
-    format=app_config.LOG_FORMAT
-)
+# Configure centralized logging
+from core.logging import setup_logging
+setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
 

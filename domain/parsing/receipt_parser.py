@@ -18,6 +18,10 @@ from domain.validation.validation_service import ValidationService
 from domain.validation.validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
 from services.retry_service import RetryService, RetryStrategy
 from core.logging import get_parser_logger
+from core.exceptions import (
+    ParsingError, ValidationError as CustomValidationError,
+    AIModelError, TokenUsageError
+)
 
 logger = get_parser_logger(__name__)
 
@@ -72,50 +76,65 @@ Remember: Return ONLY: JSON object, nothing else.
 
     def parse_text(self, text: str) -> APIResponse:
         """Main parsing method for OCR text into structured receipt data"""
-        logger.debug(f"Parsing OCR text of length: {len(text)}")
-        logger.debug(f"OCR text content: {repr(text[:200])}...")  # Log raw text for debugging
-
-        prompt = self.build_prompt(text)
-        messages = [
-            SystemMessage(content=self._system_prompt),
-            HumanMessage(content=prompt)
-        ]
-
         try:
-            response = self.llm.invoke(messages)
+            # Validate input
+            if not text or not text.strip():
+                raise ParsingError("Empty text provided for parsing")
+
+            logger.debug(f"Parsing OCR text of length: {len(text)}")
+            logger.debug(f"OCR text content: {repr(text[:200])}...")  # Log raw text for debugging
+
+            prompt = self.build_prompt(text)
+            messages = [
+                SystemMessage(content=self._system_prompt),
+                HumanMessage(content=prompt)
+            ]
+
+            # Invoke LLM with specific error handling
+            try:
+                response = self.llm.invoke(messages)
+            except Exception as e:
+                raise AIModelError(f"Failed to invoke AI model: {str(e)}")
 
             # Extract token usage from response
-            input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-            logger.info(f"Token usage - Input: {input_tokens}, Output: {output_tokens}")
+            try:
+                input_tokens, output_tokens, total_tokens = extract_token_usage(response)
+                logger.info(f"Token usage - Input: {input_tokens}, Output: {output_tokens}")
+            except Exception as e:
+                raise TokenUsageError(f"Failed to extract token usage: {str(e)}")
 
             # Validate response content
-            parsed_response = validate_response_content(response)
+            try:
+                parsed_response = validate_response_content(response)
+            except Exception as e:
+                raise CustomValidationError(f"Failed to validate response content: {str(e)}")
 
             if parsed_response.status == "failed":
-                logger.warning(f"Response content validation failed: {parsed_response.error}")
-                return APIResponse.failure(parsed_response.error)
+                raise CustomValidationError(f"Response content validation failed: {parsed_response.error}")
 
             # Validate with Pydantic model
-            validated_response = validate_with_pydantic(
-                parsed_response.data,
-                input_tokens,
-                output_tokens
-            )
+            try:
+                validated_response = validate_with_pydantic(
+                    parsed_response.data,
+                    input_tokens,
+                    output_tokens
+                )
+            except ValidationError as e:
+                raise CustomValidationError(f"Pydantic validation failed: {str(e)}")
+            except Exception as e:
+                raise CustomValidationError(f"Validation error: {str(e)}")
 
             if validated_response.status == "failed":
-                logger.warning(f"Pydantic validation failed: {validated_response.error}")
-                return validated_response
+                raise CustomValidationError(f"Pydantic validation failed: {validated_response.error}")
 
             logger.info("Parsing successful on attempt 1")
             return validated_response
 
-        except ValidationError as e:
-            logger.error("Validation error", exc_info=True)
-            return APIResponse.failure("Validation error")
-
+        except (ParsingError, AIModelError, TokenUsageError, CustomValidationError):
+            # Re-raise specific exceptions
+            raise
         except Exception as e:
-            logger.error("Error parsing receipt text", exc_info=True)
-            return APIResponse.failure("Parsing failed")
+            raise ParsingError(f"Unexpected error during receipt parsing: {str(e)}")
 
     def parse_with_retry(self, text: str, token_usage=None, max_retries: int = 3) -> APIResponse:
         """Parse with retry logic and error fixing"""

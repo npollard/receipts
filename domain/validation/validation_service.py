@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from models.receipt import Receipt
 from api_response import APIResponse
 from core.logging import get_validation_logger
+from core.exceptions import ValidationError as CustomValidationError
 
 logger = get_validation_logger(__name__)
 
@@ -16,33 +17,80 @@ class ValidationService:
 
     def validate_response_content(self, response) -> APIResponse:
         """Validate and extract content from OpenAI response"""
-        # Log raw response content for debugging
-        logger.debug(f"Raw response content: {repr(response.content)}")
-        logger.debug(f"Response type: {type(response.content)}")
-        logger.debug(f"Response length: {len(response.content)}")
-
-        # Try to parse JSON
         try:
-            parsed_data = json.loads(response.content)
-            logger.debug(f"Parsed JSON data: {parsed_data}")
+            # Log raw response content for debugging
+            logger.debug(f"Raw response content: {repr(response.content)}")
+            logger.debug(f"Response type: {type(response.content)}")
+            logger.debug(f"Response length: {len(response.content)}")
 
-            # Additional validation: check if it's a dict and has expected structure
+            # Check if response content exists
+            if not hasattr(response, 'content') or not response.content:
+                raise CustomValidationError("Empty response content received from AI model")
+
+            # Parse JSON content
+            try:
+                parsed_data = json.loads(response.content)
+            except json.JSONDecodeError as e:
+                raise CustomValidationError(f"Invalid JSON format in response: {str(e)}. Response content: {response.content[:200]}...")
+            except Exception as e:
+                raise CustomValidationError(f"Unexpected error parsing JSON response: {str(e)}")
+
+            # Validate parsed data structure
             if not isinstance(parsed_data, dict):
-                logger.error(f"Expected dict, got {type(parsed_data)}: {parsed_data}")
-                return APIResponse.failure(f"Expected JSON object, got {type(parsed_data)}")
+                raise CustomValidationError(f"Expected JSON object, got {type(parsed_data).__name__}")
+
+            # Check for required fields
+            required_fields = ['date', 'total', 'items']
+            missing_fields = [field for field in required_fields if field not in parsed_data]
+            if missing_fields:
+                raise CustomValidationError(f"Missing required fields in response: {missing_fields}")
+
+            # Validate data types
+            if 'total' in parsed_data and parsed_data['total'] is not None:
+                try:
+                    # Handle different numeric formats
+                    if isinstance(parsed_data['total'], str):
+                        parsed_data['total'] = Decimal(parsed_data['total'].replace(',', '.'))
+                    elif isinstance(parsed_data['total'], (int, float)):
+                        parsed_data['total'] = Decimal(str(parsed_data['total']))
+                    elif not isinstance(parsed_data['total'], Decimal):
+                        raise ValueError(f"Invalid total type: {type(parsed_data['total']).__name__}")
+                except (ValueError, TypeError) as e:
+                    raise CustomValidationError(f"Invalid total value '{parsed_data['total']}': {str(e)}")
+
+            if 'items' in parsed_data and parsed_data['items'] is not None:
+                if not isinstance(parsed_data['items'], list):
+                    raise CustomValidationError(f"Expected items to be a list, got {type(parsed_data['items']).__name__}")
+
+                # Validate each item
+                for i, item in enumerate(parsed_data['items']):
+                    if not isinstance(item, dict):
+                        raise CustomValidationError(f"Item {i+1} should be a dictionary, got {type(item).__name__}")
+
+                    if 'name' in item and not isinstance(item['name'], str):
+                        raise CustomValidationError(f"Item {i+1} name should be a string, got {type(item['name']).__name__}")
+
+                    if 'price' in item and item['price'] is not None:
+                        try:
+                            if isinstance(item['price'], str):
+                                item['price'] = Decimal(item['price'].replace(',', '.'))
+                            elif isinstance(item['price'], (int, float)):
+                                item['price'] = Decimal(str(item['price']))
+                            elif not isinstance(item['price'], Decimal):
+                                raise ValueError(f"Invalid price type: {type(item['price']).__name__}")
+                        except (ValueError, TypeError) as e:
+                            raise CustomValidationError(f"Invalid price value '{item['price']}' in item {i+1}: {str(e)}")
+
+            logger.debug(f"Parsed JSON data: {parsed_data}")
+            logger.info(f"Successfully validated receipt with {len(parsed_data.get('items', []))} items")
 
             return APIResponse.success(parsed_data)
 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {str(e)}")
-            logger.error(f"Response content that failed: {repr(response.content)}")
-            return APIResponse.failure(f"Failed to parse JSON: {str(e)}")
+        except CustomValidationError:
+            # Re-raise validation-specific exceptions
+            raise
         except Exception as e:
-            logger.error(f"Unexpected error parsing response: {str(e)}")
-            if "JSONDecodeError" in str(e):
-                return APIResponse.failure(f"Failed to parse JSON: {str(e)}")
-            else:
-                return APIResponse.failure(f"Unexpected parsing error: {str(e)}")
+            raise CustomValidationError(f"Unexpected error during response validation: {str(e)}")
 
     def validate_with_pydantic(self, parsed_data: dict, input_tokens: int, output_tokens: int) -> APIResponse:
         """Validate parsed data with Pydantic and handle errors"""

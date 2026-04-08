@@ -23,6 +23,9 @@ from services.batch_service import BatchProcessingService
 from services.token_service import TokenUsageService
 from services.file_service import FileHandlingService
 from core.logging import get_pipeline_logger
+from core.exceptions import (
+    OCRError, ParsingError, StorageError, ReceiptProcessingError
+)
 from config import DEFAULT_USER_EMAIL
 
 logger = get_pipeline_logger(__name__)
@@ -106,9 +109,18 @@ class ReceiptProcessor:
                 # No repository mode - return failure directly
                 return parse_result
 
-        except Exception as e:
-            logger.error(f"Unexpected error processing {image_path}: {str(e)}")
+        except (OCRError, ParsingError, StorageError) as e:
+            # Handle specific pipeline errors
+            logger.error(f"Pipeline error processing {image_path}: {str(e)}")
             return self._handle_processing_error(e, image_path, receipt_record)
+        except Exception as e:
+            # Handle unexpected errors
+            logger.error(f"Unexpected error processing {image_path}: {str(e)}")
+            return self._handle_processing_error(
+                ReceiptProcessingError(f"Unexpected pipeline error: {str(e)}"),
+                image_path,
+                receipt_record
+            )
 
     def _handle_successful_parsing(self, parse_result: APIResponse, image_path: str, ocr_text: str, receipt_record) -> APIResponse:
         """Handle successful parsing with persistence"""

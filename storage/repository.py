@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Optional, Dict, Any, List, Union, Tuple
 from uuid import UUID, uuid4
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError, OperationalError
 
 from database_models import (
     Receipt, ReceiptItem, User,
@@ -14,6 +15,10 @@ from database_models import (
 from api_response import APIResponse
 from core.hashing import calculate_image_hash, calculate_data_hash
 from core.logging import get_storage_logger
+from core.exceptions import (
+    StorageError, DatabaseConnectionError, DataIntegrityError,
+    IdempotencyError
+)
 from .database import DatabaseConnection, handle_uuid_for_db
 from .idempotency import IdempotencyHelper
 from models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel
@@ -91,82 +96,142 @@ class ReceiptRepository:
                     estimated_cost: Decimal = Decimal('0.000000'),
                     ocr_confidence: Optional[float] = None) -> Tuple[Receipt, str]:
         """Save a complete receipt with OCR and parsed data with idempotency"""
-        # Validate that parsed_response.data is a ReceiptModel
-        if parsed_response.success and parsed_response.data:
-            if not isinstance(parsed_response.data, ReceiptModel):
-                raise ValueError("parsed_response.data must be a ReceiptModel instance")
-
-        session = self.db_connection.get_session()
         try:
-            idempotency_helper = IdempotencyHelper(session)
+            # Validate inputs
+            if not image_path or not isinstance(image_path, str):
+                raise StorageError("Invalid image path provided")
 
-            # Check for existing receipts using idempotency helper
-            existing_receipt = idempotency_helper.get_existing_receipt_for_update(
-                self._user_id_for_db, image_path,
-                parsed_response.data.model_dump() if parsed_response.success and parsed_response.data else None
-            )
+            if not ocr_text or not isinstance(ocr_text, str):
+                raise StorageError("Invalid OCR text provided")
 
-            if existing_receipt:
-                logger.info(f"Returning existing receipt due to idempotency: {existing_receipt.id}")
-                return existing_receipt, "duplicate"
+            if not isinstance(parsed_response, APIResponse):
+                raise StorageError("Invalid parsed_response provided")
 
-            receipt_hash = calculate_image_hash(image_path)
-
-            # Prepare receipt data
-            receipt_data = {
-                'user_id': self._user_id_for_db,
-                'image_path': image_path,
-                'receipt_hash': receipt_hash,
-                'status': 'success' if parsed_response.success else 'failed',
-                'raw_ocr_text': ocr_text,
-                'ocr_confidence': Decimal(str(ocr_confidence)) if ocr_confidence else None,
-                'processing_started_at': datetime.utcnow(),
-                'processing_completed_at': datetime.utcnow(),
-                'input_tokens': input_tokens,
-                'output_tokens': output_tokens,
-                'estimated_cost': estimated_cost
-            }
-
-            # Add parsed data if successful
+            # Validate that parsed_response.data is a ReceiptModel
             if parsed_response.success and parsed_response.data:
-                receipt_model = parsed_response.data
-                receipt_data['receipt_date'] = parse_receipt_date(receipt_model.date)
-                receipt_data['total_amount'] = receipt_model.total
-                receipt_data['merchant_name'] = extract_merchant_name(ocr_text, receipt_model.model_dump())
-                # Convert model_dump to JSON-serializable format
-                parsed_dict = receipt_model.model_dump()
-                # Convert Decimals to strings for JSON storage
-                if 'total' in parsed_dict and parsed_dict['total'] is not None:
-                    parsed_dict['total'] = str(parsed_dict['total'])
-                if 'items' in parsed_dict:
-                    for item in parsed_dict['items']:
-                        if 'price' in item and item['price'] is not None:
-                            item['price'] = str(item['price'])
-                receipt_data['parsed_data'] = parsed_dict
-            else:
-                receipt_data['processing_error'] = parsed_response.error[:1000] if parsed_response.error else None
+                if not isinstance(parsed_response.data, ReceiptModel):
+                    raise StorageError("parsed_response.data must be a ReceiptModel instance")
 
-            # Create receipt with conflict handling
-            receipt, status = idempotency_helper.create_receipt_with_conflict_handling(receipt_data)
+            session = self.db_connection.get_session()
+            try:
+                idempotency_helper = IdempotencyHelper(session)
 
-            if status == "success" and parsed_response.success and parsed_response.data:
-                # Create receipt items from validated model
-                receipt_model = parsed_response.data
-                if receipt_model.items:
-                    self._create_receipt_items_from_models(session, receipt.id, receipt_model.items)
+                # Check for existing receipts using idempotency helper
+                try:
+                    existing_receipt = idempotency_helper.get_existing_receipt_for_update(
+                        self._user_id_for_db, image_path,
+                        parsed_response.data.model_dump() if parsed_response.success and parsed_response.data else None
+                    )
+                except Exception as e:
+                    raise IdempotencyError(f"Failed to check for existing receipt: {str(e)}")
 
-            session.commit()
-            session.refresh(receipt)
+                if existing_receipt:
+                    logger.info(f"Returning existing receipt due to idempotency: {existing_receipt.id}")
+                    return existing_receipt, "duplicate"
 
-            logger.info(f"Saved receipt with status '{status}': {receipt.id}")
-            return receipt, status
+                # Calculate image hash
+                try:
+                    receipt_hash = calculate_image_hash(image_path)
+                except Exception as e:
+                    raise StorageError(f"Failed to calculate image hash for {image_path}: {str(e)}")
 
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error saving receipt: {e}")
+                # Prepare receipt data
+                receipt_data = {
+                    'user_id': self._user_id_for_db,
+                    'image_path': image_path,
+                    'receipt_hash': receipt_hash,
+                    'status': 'success' if parsed_response.success else 'failed',
+                    'raw_ocr_text': ocr_text,
+                    'ocr_confidence': Decimal(str(ocr_confidence)) if ocr_confidence else None,
+                    'processing_started_at': datetime.utcnow(),
+                    'processing_completed_at': datetime.utcnow(),
+                    'input_tokens': input_tokens,
+                    'output_tokens': output_tokens,
+                    'estimated_cost': estimated_cost
+                }
+
+                # Add parsed data if successful
+                if parsed_response.success and parsed_response.data:
+                    receipt_model = parsed_response.data
+                    try:
+                        receipt_data['receipt_date'] = parse_receipt_date(receipt_model.date)
+                        receipt_data['total_amount'] = receipt_model.total
+                        receipt_data['merchant_name'] = extract_merchant_name(receipt_model.merchant)
+                    except Exception as e:
+                        raise DataIntegrityError(f"Failed to extract receipt data: {str(e)}")
+
+                # Create receipt record
+                try:
+                    receipt = Receipt(**receipt_data)
+                    session.add(receipt)
+                    session.flush()  # Get the ID without committing
+                except IntegrityError as e:
+                    raise DataIntegrityError(f"Data integrity error creating receipt: {str(e)}")
+                except SQLAlchemyError as e:
+                    raise DatabaseConnectionError(f"Database error creating receipt: {str(e)}")
+                except Exception as e:
+                    raise StorageError(f"Unexpected error creating receipt: {str(e)}")
+
+                # Add receipt items if successful parsing
+                if parsed_response.success and parsed_response.data and receipt_model.items:
+                    try:
+                        self._save_receipt_items(session, receipt.id, receipt_model.items)
+                    except Exception as e:
+                        raise StorageError(f"Failed to save receipt items: {str(e)}")
+
+                session.commit()
+                logger.info(f"Successfully saved receipt {receipt.id} for user {self.user_id}")
+                return receipt, "created"
+
+            except (StorageError, DatabaseConnectionError, DataIntegrityError, IdempotencyError):
+                # Re-raise specific exceptions
+                session.rollback()
+                raise
+            except Exception as e:
+                session.rollback()
+                raise StorageError(f"Unexpected error during receipt save: {str(e)}")
+            finally:
+                session.close()
+
+        except (StorageError, DatabaseConnectionError, DataIntegrityError, IdempotencyError):
+            # Re-raise specific exceptions
             raise
-        finally:
-            session.close()
+        except Exception as e:
+            raise StorageError(f"Unexpected error in save_receipt: {str(e)}")
+
+    def _save_receipt_items(self, session, receipt_id: UUID, items: List[ReceiptItemModel]):
+        """Save receipt items with proper error handling"""
+        try:
+            for item in items:
+                # Validate item data
+                if not item.name:
+                    raise DataIntegrityError("Receipt item name is required")
+
+                if item.price is not None and item.price < 0:
+                    raise DataIntegrityError(f"Invalid item price: {item.price}")
+
+                item_data = {
+                    'receipt_id': receipt_id,
+                    'name': item.name,
+                    'price': item.price,
+                    'quantity': item.quantity or 1
+                }
+
+                try:
+                    receipt_item = ReceiptItem(**item_data)
+                    session.add(receipt_item)
+                except IntegrityError as e:
+                    raise DataIntegrityError(f"Data integrity error creating receipt item: {str(e)}")
+                except SQLAlchemyError as e:
+                    raise DatabaseConnectionError(f"Database error creating receipt item: {str(e)}")
+                except Exception as e:
+                    raise StorageError(f"Unexpected error creating receipt item: {str(e)}")
+
+        except (DataIntegrityError, DatabaseConnectionError, StorageError):
+            # Re-raise specific exceptions
+            raise
+        except Exception as e:
+            raise StorageError(f"Unexpected error in _save_receipt_items: {str(e)}")
 
     def create_pending_receipt(self, image_path: str, ocr_text: str, ocr_confidence: Optional[float] = None) -> Receipt:
         """Create a new receipt record in pending status"""
@@ -174,26 +239,51 @@ class ReceiptRepository:
         try:
             receipt_hash = calculate_image_hash(image_path)
 
-            receipt = Receipt(
-                user_id=self._user_id_for_db,
-                image_path=image_path,
-                receipt_hash=receipt_hash,
-                status='pending',
-                raw_ocr_text=ocr_text,
-                ocr_confidence=Decimal(str(ocr_confidence)) if ocr_confidence else None,
-                processing_started_at=datetime.utcnow()
-            )
+            receipt_data = {
+                'user_id': self._user_id_for_db,
+                'image_path': image_path,
+                'receipt_hash': receipt_hash,
+                'status': 'pending',
+                'raw_ocr_text': ocr_text,
+                'ocr_confidence': Decimal(str(ocr_confidence)) if ocr_confidence else None,
+                'processing_started_at': datetime.utcnow(),
+            }
 
+            receipt = Receipt(**receipt_data)
             session.add(receipt)
+            session.flush()  # Get the ID without committing
             session.commit()
-            session.refresh(receipt)
 
-            logger.info(f"Created pending receipt: {receipt.id}")
+            logger.info(f"Created pending receipt {receipt.id} for user {self.user_id}")
             return receipt
+
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise DatabaseConnectionError(f"Database error creating pending receipt: {str(e)}")
         except Exception as e:
             session.rollback()
-            logger.error(f"Error creating pending receipt: {e}")
-            raise
+            raise StorageError(f"Unexpected error creating pending receipt: {str(e)}")
+        finally:
+            session.close()
+
+    def check_existing_receipt_by_image_hash(self, image_path: str) -> Optional[Receipt]:
+        """Check if a receipt already exists for the given image hash"""
+        session = self.db_connection.get_session()
+        try:
+            receipt_hash = calculate_image_hash(image_path)
+
+            receipt = session.query(Receipt).filter(
+                Receipt.user_id == self._user_id_for_db,
+                Receipt.receipt_hash == receipt_hash
+            ).first()
+
+            if receipt:
+                logger.info(f"Found existing receipt {receipt.id} for image hash {receipt_hash}")
+
+            return receipt
+
+        except Exception as e:
+            raise StorageError(f"Error checking existing receipt: {str(e)}")
         finally:
             session.close()
 

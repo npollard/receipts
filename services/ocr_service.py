@@ -12,6 +12,10 @@ from langchain_core.messages import HumanMessage
 
 from core.file_operations import encode_file_base64
 from core.logging import get_ocr_logger
+from core.exceptions import (
+    OCRError, ImageProcessingError, TextExtractionError,
+    VisionAPIError, QualityScoreError
+)
 from config.ocr_config import OCRConfig, ENV_OCR_CONFIG
 
 logger = get_ocr_logger(__name__)
@@ -323,35 +327,174 @@ class OCRService:
         """Preprocess image for EasyOCR"""
         try:
             if not os.path.exists(image_path):
-                raise FileNotFoundError(f"Image file not found: {image_path}")
+                raise ImageProcessingError(f"Image file not found: {image_path}")
 
             # Load and validate image
-            image = Image.open(image_path)
+            try:
+                image = Image.open(image_path)
+                image.verify()  # Verify image integrity
+            except (IOError, OSError) as e:
+                raise ImageProcessingError(f"Invalid or corrupted image file: {image_path} - {str(e)}")
 
             # Convert to RGB if necessary
             if image.mode != 'RGB':
-                image = image.convert('RGB')
+                try:
+                    image = image.convert('RGB')
+                except Exception as e:
+                    raise ImageProcessingError(f"Failed to convert image to RGB: {image_path} - {str(e)}")
 
             # Convert to numpy array for EasyOCR
-            image_array = np.array(image)
+            try:
+                image_array = np.array(image)
+            except Exception as e:
+                raise ImageProcessingError(f"Failed to convert image to array: {image_path} - {str(e)}")
 
             return {
-                "image_path": image_path,
-                "image_array": image_array,
-                "original_size": image.size
+                'image_path': image_path,
+                'image_array': image_array,
+                'original_size': image.size,
+                'mode': image.mode
             }
 
-        except FileNotFoundError:
-            logger.error(f"Image file not found: {image_path}")
+        except ImageProcessingError:
+            # Re-raise specific exceptions
             raise
         except Exception as e:
-            logger.error(f"Error preprocessing image {image_path}: {str(e)}")
-            raise
+            # Catch any unexpected errors and wrap them
+            raise ImageProcessingError(f"Unexpected error preprocessing image {image_path}: {str(e)}")
 
-    def _extract_easyocr_text(self, image_input: Any) -> str:
+def _extract_easyocr_text(self, image_input: Any) -> str:
         """Extract text using EasyOCR"""
         if isinstance(image_input, str):
             # If it's a string path, preprocess first
+            processed = self._preprocess_image(image_input)
+        else:
+            processed = image_input
+
+        try:
+            # Run EasyOCR
+            results = self.ocr.readtext(processed['image_array'])
+
+            # Debug: Log raw OCR output
+            if self.debug:
+                logger.debug(f"RAW OCR OUTPUT for {processed['image_path']}:")
+                for i, (bbox, text, confidence) in enumerate(results):
+                    logger.debug(f"  {i+1:2d}. [{confidence:.3f}] {text[:50]}{'...' if len(text) > 50 else ''}")
+
+            # Extract and combine text from results
+            text_lines = []
+            confidence_scores = []
+
+            if results:  # Check if OCR found any text
+                for (bbox, text, confidence) in results:
+                    if text and confidence >= self.confidence_threshold:  # Filter by configurable threshold
+                        text_lines.append(text.strip())
+                        confidence_scores.append(confidence)
+
+            # Combine text with proper spacing and layout preservation
+            extracted_text = self._combine_text_lines(text_lines, results)
+
+            # Debug: Log filtered output
+            if self.debug:
+                logger.debug(f"FILTERED OUTPUT for {processed['image_path']} (threshold: {self.confidence_threshold}):")
+                for i, line in enumerate(text_lines):
+                    logger.debug(f"  {i+1:2d}. {line[:50]}{'...' if len(line) > 50 else ''}")
+                logger.debug(f"Combined text length: {len(extracted_text)} characters")
+
+            # Apply text normalization
+            normalized_text = self._normalize_text(extracted_text)
+
+            # Debug: Log final normalized text
+            if self.debug:
+                logger.debug(f"FINAL NORMALIZED TEXT for {processed['image_path']}:")
+                logger.debug(f"  Length: {len(normalized_text)} characters")
+                logger.debug(f"  Preview: {normalized_text[:200]}{'...' if len(normalized_text) > 200 else ''}")
+
+            # Log extraction results
+            avg_confidence = np.mean(confidence_scores) if confidence_scores else 0
+            logger.info(f"Extracted {len(normalized_text)} characters from {processed['image_path']} "
+                       f"(avg confidence: {avg_confidence:.2f})")
+
+            return normalized_text
+
+        except easyocr.EasyOCRError as e:
+            raise TextExtractionError(f"EasyOCR engine failed for {processed['image_path']}: {str(e)}")
+        except Exception as e:
+            raise TextExtractionError(f"Unexpected error during OCR extraction for {processed['image_path']}: {str(e)}")
+
+def _combine_text_lines(self, text_lines: List[str], ocr_results: List) -> str:
+    """Combine OCR text lines preserving layout structure with line reconstruction"""
+    if not text_lines or not ocr_results:
+        return ""
+
+    # Create list of (y_coord, x_coord, text) for filtered results
+    filtered_items = []
+
+    # Map text_lines to their corresponding OCR results
+    text_index = 0
+    for bbox, text, confidence in ocr_results:
+        # Only include results that passed the confidence filter
+        if text and confidence >= self.confidence_threshold and text_index < len(text_lines):
+            # Use top-left corner coordinates
+            y_coord = bbox[0][1] if bbox else 0
+            x_coord = bbox[0][0] if bbox else 0
+
+            filtered_items.append({
+                'y_coord': y_coord,
+                'x_coord': x_coord,
+                'text': text_lines[text_index],
+                'bbox': bbox
+            })
+            text_index += 1
+
+    # Group items into lines based on Y-coordinate proximity
+    lines = self._group_into_lines(filtered_items)
+
+    # Sort lines by Y-coordinate (top-to-bottom)
+    lines.sort(key=lambda line: line['y_coord'])
+
+    # Extract text from each line
+    reconstructed_lines = []
+    for line in lines:
+        # Sort items within line by X-coordinate (left-to-right)
+        line['items'].sort(key=lambda item: item['x_coord'])
+
+        # Combine items on the same line with spaces
+        line_text = ' '.join(item['text'] for item in line['items'])
+        reconstructed_lines.append(line_text)
+
+    # Join lines with newlines to create receipt-like structure
+    combined_text = '\n'.join(reconstructed_lines)
+
+    return combined_text
+
+def _group_into_lines(self, items: List[Dict]) -> List[Dict]:
+    """Group OCR items into lines based on Y-coordinate proximity"""
+    if not items:
+        return []
+
+    # Calculate line height threshold (average height * 0.5)
+    heights = []
+    for item in items:
+        bbox = item['bbox']
+        if bbox and len(bbox) >= 2:
+            height = abs(bbox[0][1] - bbox[2][1])  # Difference between top-left and bottom-left Y
+            heights.append(height)
+
+    avg_height = np.mean(heights) if heights else 20
+    line_threshold = avg_height * 0.5  # Items within 50% of average height are on same line
+
+    # Group items into lines
+    lines = []
+    current_line = None
+
+    for item in sorted(items, key=lambda x: x['y_coord']):
+        if current_line is None:
+            # Start first line
+            current_line = {
+                'y_coord': item['y_coord'],
+                'items': [item]
+            }
             processed = self._preprocess_image(image_input)
         else:
             processed = image_input
