@@ -12,7 +12,7 @@ from database_models import (
     parse_receipt_date, extract_merchant_name
 )
 from api_response import APIResponse
-from utils.hashing import calculate_image_hash, calculate_data_hash
+from core.hashing import calculate_image_hash, calculate_data_hash
 from .database import DatabaseConnection, handle_uuid_for_db
 from .idempotency import IdempotencyHelper
 from models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel

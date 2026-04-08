@@ -14,9 +14,9 @@ from user_manager import UserManager
 from receipt_persistence import ReceiptPersistence
 from api_response import APIResponse
 
-from services.batch.batch_service import BatchProcessingService
-from services.token.token_service import TokenUsageService
-from services.file.file_service import FileHandlingService
+from services.batch_service import BatchProcessingService
+from services.token_service import TokenUsageService
+from services.file_service import FileHandlingService
 
 from config import DEFAULT_USER_EMAIL
 

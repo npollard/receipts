@@ -7,7 +7,7 @@ from uuid import UUID
 
 from tracking import TokenUsage
 from api_response import APIResponse
-from utils.file_utils import get_image_files
+from core.file_operations import get_image_files
 
 logger = logging.getLogger(__name__)
 

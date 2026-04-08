@@ -10,7 +10,7 @@ from datetime import datetime, date
 from contextlib import contextmanager
 
 from infrastructure.database.init_db import CleanDatabaseInitializer
-from utils.hashing import calculate_image_hash, calculate_data_hash
+from core.hashing import calculate_image_hash, calculate_data_hash
 from api_response import APIResponse
 
 logger = logging.getLogger(__name__)

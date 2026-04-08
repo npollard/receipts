@@ -11,7 +11,7 @@ import numpy as np
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
-from utils.file_utils import encode_file_base64
+from core.file_operations import encode_file_base64
 from config.ocr_config import OCRConfig, ENV_OCR_CONFIG
 
 logger = logging.getLogger(__name__)

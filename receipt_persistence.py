@@ -11,7 +11,7 @@ from database_models import (
     DatabaseManager, Receipt, ReceiptItem, User,
     parse_receipt_date, extract_merchant_name
 )
-from utils.hashing import calculate_image_hash, calculate_receipt_data_hash
+from core.hashing import calculate_image_hash, calculate_receipt_data_hash
 import os
 
 logger = logging.getLogger(__name__)

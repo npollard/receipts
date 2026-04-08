@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database_models import Receipt
-from utils.hashing import calculate_image_hash, calculate_data_hash
+from core.hashing import calculate_image_hash, calculate_data_hash
 
 logger = logging.getLogger(__name__)
 
