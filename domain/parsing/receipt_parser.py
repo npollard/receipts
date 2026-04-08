@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
+from contracts.interfaces import ReceiptParsingInterface
 from models.receipt import Receipt
 from api_response import APIResponse
 from token_usage_persistence import TokenUsagePersistence
@@ -21,7 +22,7 @@ from services.retry_service import RetryService, RetryStrategy
 logger = logging.getLogger(__name__)
 
 
-class ReceiptParser:
+class ReceiptParser(ReceiptParsingInterface):
     """Unified receipt parser with LLM-based parsing and retry logic"""
 
     def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.0):
@@ -31,13 +32,9 @@ class ReceiptParser:
             api_key=os.environ.get("OPENAI_API_KEY")
         )
         self.validation_service = ValidationService()
+        self.retry_service = RetryService()
         self.token_usage = TokenUsage()
         self.persistence = TokenUsagePersistence()
-        self.retry_service = RetryService(
-            max_retries=3,
-            strategy=RetryStrategy.EXPONENTIAL_BACKOFF,
-            base_delay=0.5
-        )
 
         self._system_prompt = """
 You are a receipt parser that returns ONLY valid JSON.

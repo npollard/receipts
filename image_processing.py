@@ -2,8 +2,9 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Dict
 from langchain_core.tools import tool
+from contracts.interfaces import ImageProcessingInterface
 from services.ocr_service import OCRService
 
 logger = logging.getLogger(__name__)
@@ -23,18 +24,18 @@ class ImageProcessor(ABC):
         pass
 
 
-class VisionProcessor(ImageProcessor):
-    """Concrete implementation of image processing using EasyOCR Service"""
+class VisionProcessor(ImageProcessor, ImageProcessingInterface):
+    """Concrete implementation using OCR service"""
 
-    def __init__(self, use_gpu: bool = False, lang: list = ['en'], confidence_threshold: float = 0.7):
-        self.ocr_service = OCRService(use_gpu=use_gpu, lang=lang, confidence_threshold=confidence_threshold)
-        logger.info(f"Initialized VisionProcessor with EasyOCR (GPU: {use_gpu}, Lang: {lang}, Confidence: {confidence_threshold})")
+    def __init__(self):
+        self.ocr_service = OCRService()
 
-    def preprocess(self, image_path: str) -> Any:
-        """Public interface for preprocessing"""
+    def preprocess_image(self, image_path: str) -> Dict[str, Any]:
+        """Preprocess image for OCR"""
         return self.ocr_service.preprocess_image(image_path)
 
     def extract_text(self, image_path: str) -> str:
+        """Extract text from image"""
         """Public interface for OCR extraction"""
         return self.ocr_service.extract_text(image_path)
 

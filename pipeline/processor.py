@@ -5,8 +5,13 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from uuid import UUID
 
-from image_processing import VisionProcessor
-from domain.parsing.receipt_parser import ReceiptParser
+from contracts.interfaces import (
+    ImageProcessingInterface,
+    ReceiptParsingInterface,
+    BatchProcessingInterface,
+    TokenUsageInterface,
+    FileHandlingInterface
+)
 from tracking import TokenUsage
 from database_models import DatabaseManager, Receipt
 from storage import ReceiptRepository, UserRepository
@@ -24,13 +29,16 @@ logger = logging.getLogger(__name__)
 
 
 class ReceiptProcessor:
-    """Pure orchestrator that coordinates receipt processing through services"""
+    """Pure orchestrator that coordinates receipt processing through clean interfaces"""
 
-    def __init__(self, db_manager: Optional[DatabaseManager] = None, user_id: Optional[UUID] = None):
-        # Initialize core services
-        self.image_processor = VisionProcessor()
-        self.ai_parser = ReceiptParser()
-        self.token_usage = TokenUsage()
+    def __init__(self,
+                 image_processor: ImageProcessingInterface,
+                 receipt_parser: ReceiptParsingInterface,
+                 db_manager: Optional[DatabaseManager] = None,
+                 user_id: Optional[UUID] = None):
+        # Initialize core interfaces (dependency injection)
+        self.image_processor = image_processor
+        self.receipt_parser = receipt_parser
 
         # Initialize orchestration services
         self.batch_service = BatchProcessingService()
@@ -79,12 +87,12 @@ class ReceiptProcessor:
             if self.repository:
                 receipt_record = self.repository.create_pending_receipt(image_path, "")
 
-            # Step 3: Extract OCR text
+            # Step 3: Extract OCR text using interface
             ocr_text = self.image_processor.extract_text(image_path)
             logger.info(f"Extracted OCR text: {ocr_text[:100]}..." if len(ocr_text) > 100 else f"Extracted OCR text: {ocr_text}")
 
-            # Step 4: Parse with AI (with token tracking)
-            parse_result = self.ai_parser.parse_with_usage_tracking(ocr_text, self.token_usage)
+            # Step 4: Parse with AI using interface
+            parse_result = self.receipt_parser.parse_text(ocr_text)
 
             # Step 5: Handle successful parsing
             if parse_result.status == "success" and self.repository and receipt_record:
@@ -104,10 +112,11 @@ class ReceiptProcessor:
 
     def _handle_successful_parsing(self, parse_result: APIResponse, image_path: str, ocr_text: str, receipt_record) -> APIResponse:
         """Handle successful parsing with persistence"""
-        # Extract token usage
-        input_tokens = self.token_usage.input_tokens
-        output_tokens = self.token_usage.output_tokens
-        estimated_cost = self.token_usage.get_estimated_cost()
+        # Extract token usage using interface
+        token_usage = self.receipt_parser.get_token_usage()
+        input_tokens = token_usage.input_tokens
+        output_tokens = token_usage.output_tokens
+        estimated_cost = token_usage.get_estimated_cost()
 
         # Save receipt with idempotency handling
         updated_receipt, save_status = self.repository.save_receipt(
@@ -136,7 +145,7 @@ class ReceiptProcessor:
             }
         }
 
-        return self.file_service.enrich_result_with_metadata(parse_result, metadata)
+        return self.file_service.format_result(parse_result, Path(image_path))
 
     def _handle_failed_parsing(self, parse_result: APIResponse, receipt_record) -> APIResponse:
         """Handle failed parsing with persistence"""
@@ -229,11 +238,6 @@ def process_receipt(image_path: str, processor: ReceiptProcessor) -> APIResponse
 
 
 # Pure orchestration functions that delegate to services
-def process_batch_images(image_files: List[Path], processor: ReceiptProcessor) -> Tuple[int, int, TokenUsage]:
-    """Process multiple images and return success/failure counts and token usage"""
-    return processor.batch_service.process_batch_images(image_files, processor, processor.token_service)
-
-
 def process_single_image(image_path: Path, processor: ReceiptProcessor) -> APIResponse:
     """Process a single image file"""
     result = processor.process_image(str(image_path))
