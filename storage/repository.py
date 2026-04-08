@@ -13,11 +13,12 @@ from database_models import (
 )
 from api_response import APIResponse
 from core.hashing import calculate_image_hash, calculate_data_hash
+from core.logging import get_storage_logger
 from .database import DatabaseConnection, handle_uuid_for_db
 from .idempotency import IdempotencyHelper
 from models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel
 
-logger = logging.getLogger(__name__)
+logger = get_storage_logger(__name__)
 
 
 class ReceiptRepository:

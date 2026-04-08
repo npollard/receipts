@@ -2,7 +2,6 @@
 
 from .processor import (
     process_receipt,
-    process_batch_images,
     process_single_image,
     validate_and_get_image_files,
     print_processing_result,
@@ -14,7 +13,6 @@ from .processor import (
 
 __all__ = [
     'process_receipt',
-    'process_batch_images', 
     'process_single_image',
     'validate_and_get_image_files',
     'print_processing_result',

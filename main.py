@@ -9,13 +9,15 @@ from typing import List, Dict, Any
 
 from pipeline.processor import (
     ReceiptProcessor,
-    process_batch_images,
     validate_and_get_image_files,
     print_batch_summary,
     print_token_usage_summary,
     save_token_usage_to_persistence,
     print_usage_summary
 )
+from image_processing import VisionProcessor
+from domain.parsing.receipt_parser import ReceiptParser
+from services.batch_service import BatchProcessingService
 from database_models import DatabaseManager
 from config import DATABASE_URL, IS_TEST, app_config
 
@@ -54,8 +56,14 @@ def main():
         db_manager.create_tables()
         logger.info(f"Database initialized: {db_manager.database_path or DATABASE_URL}")
 
-    # Initialize processor with database support
-    processor = ReceiptProcessor(db_manager=db_manager)
+    # Initialize processor with database support and dependency injection
+    image_processor = VisionProcessor()
+    receipt_parser = ReceiptParser()
+    processor = ReceiptProcessor(
+        image_processor=image_processor,
+        receipt_parser=receipt_parser,
+        db_manager=db_manager
+    )
 
     # Set user if specified
     if args.user_email and db_manager:
@@ -72,8 +80,13 @@ def main():
     if not image_files:
         return
 
-    # Process batch
-    successful, failed, token_usage = process_batch_images(image_files, processor)
+    # Process batch using the new interface-based approach
+    batch_service = BatchProcessingService()
+    successful, failed, token_usage = batch_service.process_batch(
+        image_files,
+        image_processor,
+        receipt_parser
+    )
 
     # Print batch summary
     print_batch_summary(successful, failed, len(image_files))

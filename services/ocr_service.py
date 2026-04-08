@@ -1,6 +1,5 @@
 """OCR service for extracting text from images using local EasyOCR"""
 
-import logging
 import re
 import os
 from typing import Any, List, Dict
@@ -12,9 +11,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
 from core.file_operations import encode_file_base64
+from core.logging import get_ocr_logger
 from config.ocr_config import OCRConfig, ENV_OCR_CONFIG
 
-logger = logging.getLogger(__name__)
+logger = get_ocr_logger(__name__)
 
 
 class OCRService:
@@ -98,11 +98,11 @@ class OCRService:
         try:
             # Debug OCR header
             if self.debug_ocr:
-                print(f"\n{'='*60}")
-                print(f"OCR DECISION DEBUG FOR: {os.path.basename(image_path)}")
-                print(f"{'='*60}")
-                print(f"Quality Threshold: {self.quality_threshold:.3f}")
-                print(f"Debug Mode: ENABLED")
+                logger.debug("="*60)
+                logger.debug(f"OCR DECISION DEBUG FOR: {os.path.basename(image_path)}")
+                logger.debug("="*60)
+                logger.debug(f"Quality Threshold: {self.quality_threshold:.3f}")
+                logger.debug("Debug Mode: ENABLED")
 
             # First, extract text using EasyOCR
             easyocr_text = self._extract_easyocr_text(image_path)
@@ -115,41 +115,41 @@ class OCRService:
 
             # Debug OCR score printing
             if self.debug_ocr:
-                print(f"\n--- EASYOCR RESULTS ---")
-                print(f"Quality Score: {quality_score:.3f}")
-                print(f"Text Length: {len(easyocr_text)} characters")
-                print(f"Text Preview: {easyocr_text[:200]}{'...' if len(easyocr_text) > 200 else ''}")
+                logger.debug("--- EASYOCR RESULTS ---")
+                logger.debug(f"Quality Score: {quality_score:.3f}")
+                logger.debug(f"Text Length: {len(easyocr_text)} characters")
+                logger.debug(f"Text Preview: {easyocr_text[:200]}{'...' if len(easyocr_text) > 200 else ''}")
 
                 # Show component scores
                 reasoning = self.get_fallback_reasoning(easyocr_text, self.quality_threshold)
-                print(f"\n--- QUALITY SCORE BREAKDOWN ---")
-                print(f"Text Length: {reasoning['component_scores']['text_length']:.1f}/20")
-                print(f"Price Patterns: {reasoning['component_scores']['price_patterns']:.1f}/25")
-                print(f"Total Keywords: {reasoning['component_scores']['total_keyword']:.1f}/20")
-                print(f"Word Quality: {reasoning['component_scores']['word_quality']:.1f}/25")
-                print(f"Noise Penalty: -{reasoning['component_scores']['noise_penalty']:.1f}/10")
-                print(f"Total Raw Score: {sum(reasoning['component_scores'].values()) - 2*reasoning['component_scores']['noise_penalty']:.1f}/100")
+                logger.debug("--- QUALITY SCORE BREAKDOWN ---")
+                logger.debug(f"Text Length: {reasoning['component_scores']['text_length']:.1f}/20")
+                logger.debug(f"Price Patterns: {reasoning['component_scores']['price_patterns']:.1f}/25")
+                logger.debug(f"Total Keywords: {reasoning['component_scores']['total_keyword']:.1f}/20")
+                logger.debug(f"Word Quality: {reasoning['component_scores']['word_quality']:.1f}/25")
+                logger.debug(f"Noise Penalty: -{reasoning['component_scores']['noise_penalty']:.1f}/10")
+                logger.debug(f"Total Raw Score: {sum(reasoning['component_scores'].values()) - 2*reasoning['component_scores']['noise_penalty']:.1f}/100")
 
             # Determine if fallback is needed
             should_fallback = self.should_fallback(easyocr_text, self.quality_threshold)
 
             # Debug fallback decision
             if self.debug_ocr:
-                print(f"\n--- FALLBACK DECISION ---")
-                print(f"Quality Score ({quality_score:.3f}) < Threshold ({self.quality_threshold:.3f}): {should_fallback}")
-                print(f"Fallback Required: {'YES' if should_fallback else 'NO'}")
+                logger.debug("--- FALLBACK DECISION ---")
+                logger.debug(f"Quality Score ({quality_score:.3f}) < Threshold ({self.quality_threshold:.3f}): {should_fallback}")
+                logger.debug(f"Fallback Required: {'YES' if should_fallback else 'NO'}")
 
                 if should_fallback:
-                    print(f"Reasoning: {reasoning['reasoning']}")
+                    logger.debug(f"Reasoning: {reasoning['reasoning']}")
                 else:
-                    print(f"Reasoning: Good quality OCR - using EasyOCR result")
+                    logger.debug("Reasoning: Good quality OCR - using EasyOCR result")
 
             if should_fallback:
                 logger.warning(f"EasyOCR quality below threshold - falling back to Vision OCR for {image_path}")
 
                 # Debug fallback initiation
                 if self.debug_ocr:
-                    print(f"\n--- INITIATING FALLBACK TO VISION OCR ---")
+                    logger.debug("--- INITIATING FALLBACK TO VISION OCR ---")
 
                 # Fallback to Vision OCR
                 vision_text = self._extract_vision_text(image_path)

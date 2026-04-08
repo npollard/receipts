@@ -22,10 +22,10 @@ from api_response import APIResponse
 from services.batch_service import BatchProcessingService
 from services.token_service import TokenUsageService
 from services.file_service import FileHandlingService
-
+from core.logging import get_pipeline_logger
 from config import DEFAULT_USER_EMAIL
 
-logger = logging.getLogger(__name__)
+logger = get_pipeline_logger(__name__)
 
 
 class ReceiptProcessor:
@@ -259,13 +259,16 @@ def print_batch_summary(successful: int, failed: int, total: int):
 def print_token_usage_summary(token_usage: TokenUsage):
     """Print token usage summary for current batch"""
     token_service = TokenUsageService()
-    token_service.print_token_usage_summary(token_usage)
+    token_service.print_usage_summary(token_usage)
 
 
 def save_token_usage_to_persistence(token_usage: TokenUsage):
     """Save token usage to persistent storage"""
+    import uuid
     token_service = TokenUsageService()
-    token_service.save_token_usage_to_persistence(token_usage)
+    # Use a default user ID when running without database
+    default_user_id = uuid.uuid4()
+    token_service.save_token_usage_to_persistence(default_user_id, token_usage)
 
 
 def print_usage_summary(show_persisted: bool = False):

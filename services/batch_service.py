@@ -14,8 +14,9 @@ from contracts.interfaces import (
 from tracking import TokenUsage
 from api_response import APIResponse
 from core.file_operations import get_image_files
+from core.logging import get_batch_logger
 
-logger = logging.getLogger(__name__)
+logger = get_batch_logger(__name__)
 
 
 class BatchProcessingService(BatchProcessingInterface):
@@ -49,25 +50,26 @@ class BatchProcessingService(BatchProcessingInterface):
             # Update counters
             if result.status == 'success':
                 successful_processes += 1
-                self.logger.info("SUCCESS")
+                logger.info(f"Successfully processed {image_path}")
             else:
                 failed_processes += 1
-                self.logger.error("FAILED")
+                logger.error(f"Failed to process {image_path}")
 
         return successful_processes, failed_processes, total_token_usage
 
     def validate_image_files(self, imgs_dir: Path) -> List[Path]:
         """Validate and get list of image files to process"""
         if not imgs_dir.exists():
-            self.logger.error(f"Directory 'imgs' not found: {imgs_dir}")
+            logger.error(f"Directory 'imgs' not found: {imgs_dir}")
             return []
 
         image_files = get_image_files(imgs_dir)
 
         if not image_files:
-            self.logger.warning(f"No image files found in {imgs_dir}")
+            logger.warning(f"No image files found in {imgs_dir}")
             return []
 
+        logger.info(f"Found {len(image_files)} image files to process")
         return image_files
 
     def get_batch_summary(self, successful: int, failed: int, total: int) -> str:
@@ -85,23 +87,23 @@ Success Rate: {(successful/total*100):.1f}%
 
     def print_batch_summary(self, successful: int, failed: int, total: int):
         """Print batch processing summary"""
-        self.logger.info("=" * 50)
-        self.logger.info("BATCH PROCESSING COMPLETE")
-        self.logger.info(f"Successful: {successful}")
-        self.logger.info(f"Failed: {failed}")
-        self.logger.info(f"Total: {total}")
-        self.logger.info(f"Success Rate: {(successful/total*100):.1f}%")
-        self.logger.info("=" * 50)
+        logger.info("=" * 50)
+        logger.info("BATCH PROCESSING COMPLETE")
+        logger.info(f"Successful: {successful}")
+        logger.info(f"Failed: {failed}")
+        logger.info(f"Total: {total}")
+        logger.info(f"Success Rate: {(successful/total*100):.1f}%")
+        logger.info("=" * 50)
 
     def print_processing_result(self, result: APIResponse, image_files: List[Path], index: int):
         """Print the result of processing a single image"""
-        self.logger.info(f"Processing image: {image_files[index]}")
+        logger.info(f"Processing image: {image_files[index]}")
 
         if result.status == 'success':
-            self.logger.info("SUCCESS")
+            logger.info("SUCCESS")
             if result.data:
-                self.logger.info(f"Parsed Receipt: {result.data}")
+                logger.info(f"Parsed Receipt: {result.data}")
         else:
-            self.logger.error("FAILED")
+            logger.error(f"FAILED: {result.error}")
             if result.error:
-                self.logger.error(f"Error: {result.error}")
+                logger.error(f"Error: {result.error}")

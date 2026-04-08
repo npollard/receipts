@@ -1,15 +1,14 @@
 """Validation service for receipt data validation"""
 
-import logging
-from typing import Dict, Any
 import json
 from decimal import Decimal
 from pydantic import ValidationError
 
 from models.receipt import Receipt
 from api_response import APIResponse
+from core.logging import get_validation_logger
 
-logger = logging.getLogger(__name__)
+logger = get_validation_logger(__name__)
 
 
 class ValidationService:

@@ -1,10 +1,9 @@
 """Core receipt parsing functionality"""
 
-import logging
-from typing import Dict, Any
 import json
 import os
 from decimal import Decimal
+from typing import Dict, Any
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -18,8 +17,9 @@ from tracking import TokenUsage, extract_token_usage
 from domain.validation.validation_service import ValidationService
 from domain.validation.validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
 from services.retry_service import RetryService, RetryStrategy
+from core.logging import get_parser_logger
 
-logger = logging.getLogger(__name__)
+logger = get_parser_logger(__name__)
 
 
 class ReceiptParser(ReceiptParsingInterface):
@@ -93,7 +93,7 @@ Remember: Return ONLY: JSON object, nothing else.
 
             if parsed_response.status == "failed":
                 logger.warning(f"Response content validation failed: {parsed_response.error}")
-                return parsed_response
+                return APIResponse.failure(parsed_response.error)
 
             # Validate with Pydantic model
             validated_response = validate_with_pydantic(
@@ -110,14 +110,12 @@ Remember: Return ONLY: JSON object, nothing else.
             return validated_response
 
         except ValidationError as e:
-            error_msg = f"Validation error: {str(e)}"
-            logger.error(error_msg)
-            return APIResponse.failure(error_msg)
+            logger.error("Validation error", exc_info=True)
+            return APIResponse.failure("Validation error")
 
         except Exception as e:
-            error_msg = f"Parsing error: {str(e)}"
-            logger.error(error_msg)
-            return APIResponse.failure(error_msg)
+            logger.error("Error parsing receipt text", exc_info=True)
+            return APIResponse.failure("Parsing failed")
 
     def parse_with_retry(self, text: str, token_usage=None, max_retries: int = 3) -> APIResponse:
         """Parse with retry logic and error fixing"""
@@ -188,6 +186,10 @@ Return ONLY valid JSON that addresses the specific error mentioned above.
     def get_token_usage_summary(self) -> str:
         """Get current token usage summary"""
         return self.token_usage.get_summary()
+
+    def get_token_usage(self) -> TokenUsage:
+        """Get token usage from parsing operations"""
+        return self.token_usage
 
     def reset_token_usage(self):
         """Reset token usage tracking"""

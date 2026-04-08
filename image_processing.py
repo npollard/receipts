@@ -30,13 +30,16 @@ class VisionProcessor(ImageProcessor, ImageProcessingInterface):
     def __init__(self):
         self.ocr_service = OCRService()
 
+    def preprocess(self, image_path: str) -> Any:
+        """Preprocess image for OCR"""
+        return self.preprocess_image(image_path)
+
     def preprocess_image(self, image_path: str) -> Dict[str, Any]:
         """Preprocess image for OCR"""
         return self.ocr_service.preprocess_image(image_path)
 
     def extract_text(self, image_path: str) -> str:
         """Extract text from image"""
-        """Public interface for OCR extraction"""
         return self.ocr_service.extract_text(image_path)
 
     @tool
