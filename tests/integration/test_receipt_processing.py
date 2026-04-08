@@ -1,8 +1,9 @@
 from pathlib import Path
-
 from api_response import APIResponse
 from pipeline.processor import ReceiptProcessor
-import main
+from services.batch_service import BatchProcessingService
+from image_processing import VisionProcessor
+from domain.parsing.receipt_parser import ReceiptParser
 
 
 def _build_receipt(date: str, items: list[dict], total: float, input_tokens: int, output_tokens: int) -> dict:
@@ -38,18 +39,23 @@ def test_receipt_processor_process_directly_returns_expected_receipt_and_token_u
         assert path == str(image_path)
         return expected_ocr
 
-    def fake_parse_with_usage_tracking(self, text: str, token_usage) -> APIResponse:
+    def fake_parse_text(self, text: str):
         assert text == expected_ocr
-        token_usage.add_usage(
+        from domain.parsing.receipt_parser import ParsingResult
+        result = ParsingResult()
+        result.parsed = {k: v for k, v in expected_receipt.items() if k != "_token_usage"}
+        result.valid = True
+        result.error = None
+        result.token_usage.add_usage(
             expected_receipt["_token_usage"]["input_tokens"],
             expected_receipt["_token_usage"]["output_tokens"],
         )
-        return APIResponse.success(expected_receipt.copy())
+        return result
 
     monkeypatch.setattr("image_processing.VisionProcessor.extract_text", fake_extract_text)
     monkeypatch.setattr(
-        "receipt_parser.ReceiptParser.parse_with_usage_tracking",
-        fake_parse_with_usage_tracking,
+        "domain.parsing.receipt_parser.ReceiptParser.parse_text",
+        fake_parse_text,
     )
 
     processor = ReceiptProcessor()
@@ -61,7 +67,7 @@ def test_receipt_processor_process_directly_returns_expected_receipt_and_token_u
         "ocr_text": expected_ocr,
         "parsed_receipt": expected_receipt,
     }
-    assert processor.orchestrator.token_usage.to_dict() == {
+    assert processor.token_usage.to_dict() == {
         "input_tokens": 120,
         "output_tokens": 45,
         "total_tokens": 165,
@@ -108,9 +114,15 @@ def test_process_batch_images_aggregates_stubbed_token_usage(monkeypatch, tmp_pa
         return APIResponse.success(receipt_by_ocr[text].copy())
 
     monkeypatch.setattr("image_processing.VisionProcessor.extract_text", fake_extract_text)
-    monkeypatch.setattr("receipt_parser.ReceiptParser.parse_text", fake_parse_text)
+    monkeypatch.setattr("domain.parsing.receipt_parser.ReceiptParser.parse_text", fake_parse_text)
 
-    successful, failed, token_usage = main.process_batch_images(image_paths)
+    # Use BatchProcessingService directly instead of main.process_batch_images
+    image_processor = VisionProcessor()
+    receipt_parser = ReceiptParser()
+    batch_service = BatchProcessingService()
+    successful, failed, token_usage = batch_service.process_batch(
+        image_paths, image_processor, receipt_parser
+    )
 
     assert (successful, failed) == (2, 0)
     assert token_usage.to_dict() == {
@@ -152,9 +164,15 @@ def test_process_batch_images_tracks_only_successful_token_usage_when_one_parse_
         return APIResponse.failure("Validation failed: missing total")
 
     monkeypatch.setattr("image_processing.VisionProcessor.extract_text", fake_extract_text)
-    monkeypatch.setattr("receipt_parser.ReceiptParser.parse_text", fake_parse_text)
+    monkeypatch.setattr("domain.parsing.receipt_parser.ReceiptParser.parse_text", fake_parse_text)
 
-    successful, failed, token_usage = main.process_batch_images(image_paths)
+    # Use BatchProcessingService directly instead of main.process_batch_images
+    image_processor = VisionProcessor()
+    receipt_parser = ReceiptParser()
+    batch_service = BatchProcessingService()
+    successful, failed, token_usage = batch_service.process_batch(
+        image_paths, image_processor, receipt_parser
+    )
 
     assert (successful, failed) == (1, 1)
     assert token_usage.to_dict() == {

@@ -18,6 +18,8 @@ from storage import ReceiptRepository, UserRepository
 from user_manager import UserManager
 from receipt_persistence import ReceiptPersistence
 from api_response import APIResponse
+from image_processing import VisionProcessor
+from domain.parsing.receipt_parser import ReceiptParser
 
 from services.batch_service import BatchProcessingService
 from services.token_service import TokenUsageService
@@ -35,13 +37,17 @@ class ReceiptProcessor:
     """Pure orchestrator that coordinates receipt processing through clean interfaces"""
 
     def __init__(self,
-                 image_processor: ImageProcessingInterface,
-                 receipt_parser: ReceiptParsingInterface,
+                 image_processor: Optional[ImageProcessingInterface] = None,
+                 receipt_parser: Optional[ReceiptParsingInterface] = None,
                  db_manager: Optional[DatabaseManager] = None,
                  user_id: Optional[UUID] = None):
-        # Initialize core interfaces (dependency injection)
-        self.image_processor = image_processor
-        self.receipt_parser = receipt_parser
+        # Initialize core interfaces (dependency injection with defaults)
+        self.image_processor = image_processor or VisionProcessor()
+        self.receipt_parser = receipt_parser or ReceiptParser()
+        self.ai_parser = self.receipt_parser  # Temporary alias for test compatibility
+
+        # Initialize token usage tracking
+        self.token_usage = TokenUsage()
 
         # Initialize orchestration services
         self.batch_service = BatchProcessingService()
@@ -97,17 +103,39 @@ class ReceiptProcessor:
             # Step 4: Parse with AI using interface
             parse_result = self.receipt_parser.parse_text(ocr_text)
 
+            # Aggregate token usage from parsing result
+            if parse_result.token_usage:
+                self.token_usage.add_usage(
+                    parse_result.token_usage.input_tokens,
+                    parse_result.token_usage.output_tokens
+                )
+
             # Step 5: Handle successful parsing
-            if parse_result.status == "success" and self.repository and receipt_record:
+            # Note: ParsingResult uses .valid (bool), not .status (string)
+            if parse_result.valid and self.repository and receipt_record:
                 return self._handle_successful_parsing(parse_result, image_path, ocr_text, receipt_record)
-            elif parse_result.status == "success":
-                # No repository mode - return result directly
-                return parse_result
-            elif parse_result.status != "success" and self.repository and receipt_record:
+            elif parse_result.valid:
+                # No repository mode - return clean integration-level response
+                parsed_data = parse_result.parsed.copy() if parse_result.parsed else {}
+
+                # Attach token usage inside parsed_receipt
+                token_usage = parse_result.token_usage
+                parsed_data["_token_usage"] = {
+                    "input_tokens": token_usage.input_tokens,
+                    "output_tokens": token_usage.output_tokens,
+                    "total_tokens": token_usage.input_tokens + token_usage.output_tokens
+                }
+
+                return APIResponse.success({
+                    "image_path": image_path,
+                    "ocr_text": ocr_text,
+                    "parsed_receipt": parsed_data
+                })
+            elif not parse_result.valid and self.repository and receipt_record:
                 return self._handle_failed_parsing(parse_result, receipt_record)
-            elif parse_result.status != "success":
-                # No repository mode - return failure directly
-                return parse_result
+            elif not parse_result.valid:
+                # No repository mode - convert ParsingResult failure to APIResponse
+                return APIResponse.failure(parse_result.error or "Parsing failed")
 
         except (OCRError, ParsingError, StorageError) as e:
             # Handle specific pipeline errors
@@ -122,17 +150,17 @@ class ReceiptProcessor:
                 receipt_record
             )
 
-    def _handle_successful_parsing(self, parse_result: APIResponse, image_path: str, ocr_text: str, receipt_record) -> APIResponse:
+    def _handle_successful_parsing(self, parse_result, image_path: str, ocr_text: str, receipt_record) -> APIResponse:
         """Handle successful parsing with persistence"""
-        # Extract token usage using interface
-        token_usage = self.receipt_parser.get_token_usage()
+        # Extract token usage from ParsingResult
+        token_usage = parse_result.token_usage
         input_tokens = token_usage.input_tokens
         output_tokens = token_usage.output_tokens
         estimated_cost = token_usage.get_estimated_cost()
 
         # Save receipt with idempotency handling
         updated_receipt, save_status = self.repository.save_receipt(
-            image_path, ocr_text, parse_result, input_tokens, output_tokens, estimated_cost
+            image_path, ocr_text, parse_result.parsed, input_tokens, output_tokens, estimated_cost
         )
 
         if save_status == "duplicate":
@@ -159,11 +187,13 @@ class ReceiptProcessor:
 
         return self.file_service.format_result(parse_result, Path(image_path))
 
-    def _handle_failed_parsing(self, parse_result: APIResponse, receipt_record) -> APIResponse:
+    def _handle_failed_parsing(self, parse_result, receipt_record) -> APIResponse:
         """Handle failed parsing with persistence"""
-        input_tokens = self.token_usage.input_tokens
-        output_tokens = self.token_usage.output_tokens
-        estimated_cost = self.token_usage.get_estimated_cost()
+        # Extract token usage from ParsingResult
+        token_usage = parse_result.token_usage
+        input_tokens = token_usage.input_tokens
+        output_tokens = token_usage.output_tokens
+        estimated_cost = token_usage.get_estimated_cost()
 
         updated_receipt = self.repository.update_receipt_failure(
             receipt_record.id, parse_result.error or "Unknown error",

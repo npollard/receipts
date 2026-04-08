@@ -128,7 +128,7 @@ def test_unified_parser():
 
     print("\n=== ALL TESTS PASSED ===")
     print("Unified ReceiptParser is working correctly!")
-    return True
+    assert True
 
 def test_import_compatibility():
     """Test that imports still work from other modules"""
@@ -145,13 +145,13 @@ def test_import_compatibility():
             print("Interface compatibility: SUCCESS")
         else:
             print("Interface compatibility: FAILED")
-            return False
+            assert False, "Interface compatibility failed"
 
     except Exception as e:
         print(f"Import compatibility test failed: {e}")
-        return False
+        assert False, f"Import compatibility failed: {e}"
 
-    return True
+    assert True
 
 if __name__ == '__main__':
     success = test_unified_parser()

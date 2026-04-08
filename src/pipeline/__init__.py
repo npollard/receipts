@@ -1,6 +1,7 @@
 """Pipeline module for receipt processing"""
 
 from .processor import (
+    ReceiptProcessor,
     process_receipt,
     process_single_image,
     validate_and_get_image_files,
@@ -12,6 +13,7 @@ from .processor import (
 )
 
 __all__ = [
+    'ReceiptProcessor',
     'process_receipt',
     'process_single_image',
     'validate_and_get_image_files',

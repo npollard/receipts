@@ -12,7 +12,7 @@ def test_receipt_parser_initialization():
     with patch('domain.parsing.receipt_parser.ChatOpenAI'):
         parser = ReceiptParser()
         assert parser.llm is not None
-        assert parser.persistence is not None
+        assert parser.ocr_service is None  # No OCR service injected by default
 
 
 def test_receipt_parser_initialization_custom_settings():
@@ -29,9 +29,7 @@ def test_receipt_parser_initialization_custom_settings():
 
 def test_build_prompt():
     """Test prompt building from OCR text"""
-    with patch('domain.parsing.receipt_parser.ChatOpenAI'), \
-         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
-
+    with patch('domain.parsing.receipt_parser.ChatOpenAI'):
         parser = ReceiptParser()
         ocr_text = "MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
 
@@ -53,19 +51,18 @@ def test_parse_text_success():
 
     with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm, \
          patch('domain.parsing.receipt_parser.validate_response_content', return_value=APIResponse.success({"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}]})), \
-         patch('domain.parsing.receipt_parser.validate_with_pydantic', return_value=APIResponse.success({"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}], "_token_usage": {"input_tokens": 100, "output_tokens": 50}})), \
-         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
+         patch('domain.parsing.receipt_parser.validate_with_pydantic', return_value=APIResponse.success({"date": "2026-03-30", "total": 7.50, "items": [{"description": "Milk", "price": 4.50}, {"description": "Bread", "price": 3.00}], "_token_usage": {"input_tokens": 100, "output_tokens": 50}})):
 
         mock_llm.return_value.invoke.return_value = expected_response
 
         parser = ReceiptParser()
         result = parser.parse_text(ocr_text)
 
-        assert result.status == "success"
-        # result.data is now a Pydantic model, not a dictionary
-        assert hasattr(result.data, 'date')
-        assert hasattr(result.data, 'total')
-        assert hasattr(result.data, 'items')
+        assert result.valid is True
+        # result.parsed is now a Pydantic model, not a dictionary
+        assert hasattr(result.parsed, 'date')
+        assert hasattr(result.parsed, 'total')
+        assert hasattr(result.parsed, 'items')
 
 
 def test_parse_text_pydantic_validation_failure():
@@ -77,32 +74,29 @@ def test_parse_text_pydantic_validation_failure():
 
     with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm, \
          patch('domain.parsing.receipt_parser.validate_response_content', return_value=APIResponse.success({"date": "invalid-date", "total": "not-a-number", "items": []})), \
-         patch('domain.parsing.receipt_parser.validate_with_pydantic', return_value=APIResponse.failure("Validation error")), \
-         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
+         patch('domain.parsing.receipt_parser.validate_with_pydantic', return_value=APIResponse.failure("Validation error")):
 
         mock_llm.return_value.invoke.return_value = expected_response
 
         parser = ReceiptParser()
         result = parser.parse_text(ocr_text)
 
-        assert result.status == "failed"
-        assert "Data validation failed" in result.error
+        assert result.valid is False
+        assert "Validation failed" in result.error
 
 
 def test_parse_text_api_exception():
     """Test parsing when API call fails"""
     ocr_text = "MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
 
-    with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm, \
-         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
-
+    with patch('domain.parsing.receipt_parser.ChatOpenAI') as mock_llm:
         mock_llm.return_value.invoke.side_effect = Exception("API Error")
 
         parser = ReceiptParser()
         result = parser.parse_text(ocr_text)
 
-        assert result.status == "failed"
-        assert "Parsing error" in result.error
+        assert result.valid is False
+        assert result.error is not None
 
 
 def test_parse_with_retry_success_on_first_attempt():
@@ -110,18 +104,14 @@ def test_parse_with_retry_success_on_first_attempt():
     ocr_text = "MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
     expected_receipt = {"date": "2026-03-30", "total": 7.50, "items": [], "_token_usage": {"input_tokens": 100, "output_tokens": 50}}
 
-    with patch('domain.parsing.receipt_parser.ChatOpenAI'), \
-         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
-
+    with patch('domain.parsing.receipt_parser.ChatOpenAI'):
         parser = ReceiptParser()
         token_usage = Mock()
 
 
 def test_get_token_usage_safely():
     """Test safe token usage extraction"""
-    with patch('domain.parsing.receipt_parser.ChatOpenAI'), \
-         patch('domain.parsing.receipt_parser.TokenUsagePersistence'):
-
+    with patch('domain.parsing.receipt_parser.ChatOpenAI'):
         parser = ReceiptParser()
 
         # Test with valid data

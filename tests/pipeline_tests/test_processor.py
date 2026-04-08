@@ -2,8 +2,8 @@
 
 import pytest
 from unittest.mock import Mock, patch
-from pipeline.processor import ReceiptProcessor
 from api_response import APIResponse
+from pipeline.processor import ReceiptProcessor
 
 
 def test_receipt_processor_initialization():

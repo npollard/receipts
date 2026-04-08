@@ -1,8 +1,25 @@
+# Editor
 *.swp
-npollard-venv
-imgs/*
-.env
-__pycache__
-token_usage.json
-.DS_Store
 .vscode/
+.DS_Store
+
+# Environment
+.env
+.venv/
+npollard-venv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Data and outputs
+imgs/*
+token_usage.json
+*.db
+receipts.db
+
+# Build artifacts
+dist/
+build/

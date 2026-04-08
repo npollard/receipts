@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import unittest
-from services.ocr.ocr_service import OCRService
+from services.ocr_service import OCRService
 from config.ocr_config import OCRConfig
 
 

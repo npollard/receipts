@@ -13,7 +13,6 @@ from pydantic import ValidationError
 from contracts.interfaces import ReceiptParsingInterface
 from models.receipt import Receipt
 from api_response import APIResponse
-from token_usage_persistence import TokenUsagePersistence
 from tracking import TokenUsage, extract_token_usage
 from domain.validation.validation_service import ValidationService
 from domain.validation.validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
@@ -23,7 +22,7 @@ from core.exceptions import (
     ParsingError, ValidationError as CustomValidationError,
     AIModelError, TokenUsageError
 )
-from services.ocr_service import OCRService
+from contracts.interfaces import ImageProcessingInterface
 from prompts.retry_prompts import get_llm_fix_prompt, get_rag_prompt, get_vision_reparse_prompt
 
 logger = get_parser_logger(__name__)
@@ -45,7 +44,8 @@ class ParsingResult:
 class ReceiptParser(ReceiptParsingInterface):
     """Unified receipt parser with LLM-based parsing and retry logic"""
 
-    def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.0):
+    def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.0,
+                 ocr_service: ImageProcessingInterface = None):
         self.llm = ChatOpenAI(
             model=model_name,
             temperature=temperature,
@@ -54,8 +54,7 @@ class ReceiptParser(ReceiptParsingInterface):
         self.validation_service = ValidationService()
         self.retry_service = RetryService()
         self.token_usage = TokenUsage()
-        self.persistence = TokenUsagePersistence()
-        self.ocr_service = OCRService()  # For OCR fallback retry
+        self.ocr_service = ocr_service  # Injected, for OCR fallback retry
         self.current_retries = []  # Track retry strategies used
 
         self._system_prompt = """
@@ -264,10 +263,14 @@ Expected JSON format:
 
     def _ocr_fallback_retry(self, image_path: str, error_info: dict) -> ParsingResult:
         """Implement OCR fallback retry using Vision OCR"""
+        result = ParsingResult()
+
+        if self.ocr_service is None:
+            result.error = "OCR service not available for fallback"
+            return result
+
         logger.info(f"Attempting OCR fallback retry for {error_info['severity']} error")
         self.current_retries.append("OCR_FALLBACK")
-
-        result = ParsingResult()
 
         try:
             # Use Vision OCR as fallback
@@ -434,7 +437,7 @@ Expected JSON format:
                     retry_count += 1
 
             # Retry Strategy 3: OCR Fallback (if still failing OR low OCR quality)
-            if retry_count <= max_retries and image_path:
+            if retry_count <= max_retries and image_path and self.ocr_service:
                 # Check OCR quality
                 ocr_quality = self.ocr_service.score_ocr_quality(ocr_text)
                 low_quality = ocr_quality < 0.25
@@ -573,25 +576,29 @@ Remember: Return ONLY: JSON object, nothing else.
             except ValidationError as e:
                 # Preserve parsed data even if Pydantic validation failed
                 result.parsed = parsed_response.data
-                result.error = f"Pydantic validation failed: {str(e)}"
+                result.error = "Validation failed"
                 return result
             except Exception as e:
                 # Preserve parsed data even if validation failed
                 result.parsed = parsed_response.data
-                result.error = f"Validation error: {str(e)}"
+                result.error = "Validation failed"
                 return result
 
             if validated_response.status == "failed":
                 # Preserve parsed data even if validation failed
-                logger.debug(f"Pydantic validation failed. parsed_response.data: {parsed_response.data}")
+                logger.debug(f"Validation failed. parsed_response.data: {parsed_response.data}")
                 result.parsed = parsed_response.data
-                logger.info(f"Preserved parsed data on Pydantic validation failure: {parsed_response.data}")
-                result.error = f"Pydantic validation failed: {validated_response.error}"
+                logger.info(f"Preserved parsed data on validation failure: {parsed_response.data}")
+                result.error = "Validation failed"
                 return result
 
             # Success case
             logger.info("Parsing successful on attempt 1")
-            result.parsed = validated_response.data
+            # Convert dict to Pydantic model, extracting token usage first
+            data = validated_response.data.copy()
+            data.pop("_token_usage", None)  # Remove token usage before model creation
+            receipt = Receipt(**data)
+            result.parsed = receipt
             result.valid = True
             result.error = None
             return result
@@ -625,13 +632,7 @@ Remember: Return ONLY: JSON object, nothing else.
             token_usage = self.token_usage
 
         result = self.parse_with_retry(text, token_usage)
-
-        # Save token usage if successful
-        if result.success and token_usage.get_total_tokens() > 0:
-            session_id = f"session_{token_usage.get_total_tokens()}"
-            self.persistence.save_usage(token_usage, session_id)
-            logger.info(f"Saved token usage to persistent storage: {session_id}")
-
+        # Note: Token usage persistence moved to application layer
         return result
 
     def _create_fix_prompt(self, original_text: str, error_message: str, attempt_count: int) -> str:

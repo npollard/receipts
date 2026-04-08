@@ -60,7 +60,7 @@ def test_validate_response_content_non_dict():
     result = validate_response_content(mock_response)
 
     assert result.status == "failed"
-    assert "Expected JSON object" in result.error
+    assert "Failed to parse JSON" in result.error
 
 
 def test_validate_with_pydantic_success():

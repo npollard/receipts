@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from services.ocr.ocr_service import OCRService
+from services.ocr_service import OCRService
 import os
 
 def test_debug_ocr_flow():

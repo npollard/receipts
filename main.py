@@ -3,7 +3,6 @@
 import argparse
 import logging
 import os
-from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any
 
@@ -56,7 +55,8 @@ def main():
 
     # Initialize processor with database support and dependency injection
     image_processor = VisionProcessor()
-    receipt_parser = ReceiptParser()
+    ocr_service = image_processor.ocr_service  # Reuse same OCR instance
+    receipt_parser = ReceiptParser(ocr_service=ocr_service)
     processor = ReceiptProcessor(
         image_processor=image_processor,
         receipt_parser=receipt_parser,

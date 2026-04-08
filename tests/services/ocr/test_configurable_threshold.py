@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from services.ocr.ocr_service import OCRService
+from services.ocr_service import OCRService
 from config.ocr_config import OCRConfig, ENV_OCR_CONFIG
 import os
 

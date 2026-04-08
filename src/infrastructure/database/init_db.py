@@ -3,16 +3,12 @@
 import logging
 import os
 import sqlite3
-import sys
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from contextlib import contextmanager
 from uuid import uuid4
 from datetime import datetime, date
 from decimal import Decimal
-
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DATABASE_URL, DATABASE_PATH
 

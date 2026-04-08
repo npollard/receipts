@@ -1,114 +1,90 @@
 #!/usr/bin/env python3
+"""Fast integration test with dependency-injected fakes (no EasyOCR)"""
 
-from services.ocr_service import OCRService
-import os
-import json
+from tests.fakes.fake_vision_processor import FakeVisionProcessor
+from tests.fakes.fake_receipt_parser import FakeReceiptParser
+from services.batch_service import BatchProcessingService
 
-def test_integrated_pipeline():
-    print('Testing integrated OCR pipeline with quality-based fallback...')
-    
-    # Test with different quality thresholds
-    thresholds = [0.1, 0.25, 0.5, 0.9]
-    
-    for threshold in thresholds:
-        print(f'\n=== TESTING WITH QUALITY THRESHOLD: {threshold} ===')
-        
-        # Initialize OCR service with quality threshold
-        ocr_service = OCRService(
-            use_gpu=False, 
-            lang=['en'], 
-            debug=False, 
-            quality_threshold=threshold
-        )
-        
-        # Test on sample image
-        test_image = 'imgs/IMG_5416.jpg'
-        if os.path.exists(test_image):
-            print(f'Testing on: {test_image}')
-            
-            try:
-                # Extract text with integrated pipeline
-                result = ocr_service.extract_text(test_image)
-                
-                # Get quality score for the result
-                quality_score = ocr_service.score_ocr_quality(result)
-                
-                print(f'Result length: {len(result)} characters')
-                print(f'Final quality score: {quality_score:.3f}')
-                print(f'Result preview: {result[:150]}...')
-                
-                # Check if fallback was triggered
-                fallback_triggered = ocr_service.should_fallback(result, threshold)
-                print(f'Fallback would be triggered: {fallback_triggered}')
-                
-            except Exception as e:
-                print(f'Error: {e}')
+
+def test_integrated_pipeline_with_fakes():
+    """Test integrated pipeline with DI fakes - runs in milliseconds without EasyOCR"""
+
+    # Create fake dependencies (no imports of image_processing or EasyOCR)
+    image_processor = FakeVisionProcessor(
+        text="MILK 4.50\nBREAD 3.00\nTOTAL 7.50"
+    )
+
+    receipt_parser = FakeReceiptParser({
+        "date": "2026-03-30",
+        "total": 7.50,
+        "items": [
+            {"description": "Milk", "price": 4.50},
+            {"description": "Bread", "price": 3.00}
+        ],
+        "_token_usage": {
+            "input_tokens": 25,
+            "output_tokens": 15
+        }
+    })
+
+    batch_service = BatchProcessingService()
+
+    # Test with dummy paths (fakes don't need real files)
+    image_paths = ["/dummy/path/receipt1.jpg", "/dummy/path/receipt2.jpg"]
+
+    # Run the pipeline - completes in milliseconds
+    successful, failed, token_usage = batch_service.process_batch(
+        image_paths, image_processor, receipt_parser
+    )
+
+    # Validate results
+    assert successful == 2, f"Expected 2 successful, got {successful}"
+    assert failed == 0, f"Expected 0 failed, got {failed}"
+    assert token_usage.input_tokens == 50, f"Expected 50 input tokens, got {token_usage.input_tokens}"
+    assert token_usage.output_tokens == 30, f"Expected 30 output tokens, got {token_usage.output_tokens}"
+
+
+def test_pipeline_with_mixed_success_and_failure():
+    """Test pipeline handles mixed success/failure with fakes"""
+
+    image_processor = FakeVisionProcessor(text="RECEIPT TEXT")
+
+    # Create fake that fails on second call
+    receipt_parser = FakeReceiptParser({
+        "date": "2026-03-30",
+        "total": 10.00,
+        "items": [{"description": "Item", "price": 10.00}],
+        "_token_usage": {
+            "input_tokens": 20,
+            "output_tokens": 10
+        }
+    })
+
+    # Override to track calls and fail on second
+    original_parse = receipt_parser.parse_with_validation_driven_retry
+    call_count = [0]
+
+    def conditional_parse(ocr_text, image_path=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return original_parse(ocr_text, image_path)
         else:
-            print('Test image not found')
-    
-    # Test with different text samples to verify fallback logic
-    print(f'\n=== TESTING FALLBACK LOGIC WITH TEXT SAMPLES ===')
-    
-    ocr_service = OCRService(use_gpu=False, lang=['en'], quality_threshold=0.5)
-    
-    # Test samples
-    test_samples = [
-        ("Empty text", ""),
-        ("Perfect receipt", "GROCERY STORE RECEIPT\nAPPLES 3.99\nORANGES 2.50\nTOTAL 6.49\nCASH 6.49\nTHANK YOU"),
-        ("Noisy text", "@@@ ### !!! 123 456 789 *** &&& %%% ###"),
-        ("Short text", "TOTAL 5.99"),
-        ("Medium quality", "STORE\nITEM1 4.99\nITEM2 2.50\nTOTAL 7.49\nTHANKS"),
-    ]
-    
-    for name, text in test_samples:
-        print(f'\n{name}:')
-        quality_score = ocr_service.score_ocr_quality(text)
-        should_fallback = ocr_service.should_fallback(text, 0.5)
-        print(f'  Quality Score: {quality_score:.3f}')
-        print(f'  Should fallback: {should_fallback}')
-        
-        # Get detailed reasoning
-        reasoning = ocr_service.get_fallback_reasoning(text, 0.5)
-        print(f'  Reasoning: {reasoning["reasoning"]}')
-    
-    # Test the actual pipeline integration
-    print(f'\n=== TESTING ACTUAL PIPELINE INTEGRATION ===')
-    
-    ocr_service = OCRService(use_gpu=False, lang=['en'], quality_threshold=0.8)  # High threshold to trigger fallback
-    
-    test_image = 'imgs/IMG_5416.jpg'
-    if os.path.exists(test_image):
-        print(f'Testing pipeline with high threshold (0.8) on: {test_image}')
-        
-        try:
-            # This should trigger fallback since real OCR quality is 1.0, but threshold is 0.8
-            # Actually, with threshold 0.8, it should NOT trigger fallback since quality is 1.0 > 0.8
-            result = ocr_service.extract_text(test_image)
-            print(f'Pipeline result length: {len(result)} characters')
-            print(f'Pipeline result preview: {result[:150]}...')
-            
-        except Exception as e:
-            print(f'Pipeline error: {e}')
-            import traceback
-            traceback.print_exc()
-    
-    # Test with very high threshold to force fallback
-    print(f'\n=== TESTING WITH VERY HIGH THRESHOLD TO FORCE FALLBACK ===')
-    
-    ocr_service_high = OCRService(use_gpu=False, lang=['en'], quality_threshold=0.99)  # Very high threshold
-    
-    if os.path.exists(test_image):
-        print(f'Testing with very high threshold (0.99) on: {test_image}')
-        
-        try:
-            result = ocr_service_high.extract_text(test_image)
-            print(f'High threshold result length: {len(result)} characters')
-            print(f'High threshold result preview: {result[:150]}...')
-            
-        except Exception as e:
-            print(f'High threshold error: {e}')
-            import traceback
-            traceback.print_exc()
+            from domain.parsing.receipt_parser import ParsingResult
+            result = ParsingResult()
+            result.parsed = None
+            result.valid = False
+            result.error = "Validation failed"
+            return result
 
-if __name__ == '__main__':
-    test_integrated_pipeline()
+    receipt_parser.parse_with_validation_driven_retry = conditional_parse
+
+    batch_service = BatchProcessingService()
+    image_paths = ["/dummy/path/receipt1.jpg", "/dummy/path/receipt2.jpg"]
+
+    successful, failed, token_usage = batch_service.process_batch(
+        image_paths, image_processor, receipt_parser
+    )
+
+    assert successful == 1
+    assert failed == 1
+    assert token_usage.input_tokens == 20  # Only successful parse counts

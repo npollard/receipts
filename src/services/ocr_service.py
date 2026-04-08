@@ -29,11 +29,12 @@ from core.exceptions import (
     VisionAPIError, QualityScoreError
 )
 from config.ocr_config import OCRConfig, ENV_OCR_CONFIG
+from contracts.interfaces import ImageProcessingInterface
 
 logger = get_ocr_logger(__name__)
 
 
-class OCRService:
+class OCRService(ImageProcessingInterface):
     """Service for OCR text extraction using local EasyOCR"""
 
     def __init__(self, config: OCRConfig = None, use_gpu: bool = None, lang: List[str] = None, confidence_threshold: float = None, debug: bool = None, comparison_mode: bool = None, quality_threshold: float = None, debug_ocr: bool = None):

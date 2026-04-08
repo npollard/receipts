@@ -13,21 +13,20 @@ LLMs are powerful but unreliable in production. This codebase demonstrates patte
 
 ## Architecture Overview
 
+### Pipeline Flow
+
 ```
 ┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
 │   Receipt   │───→│  EasyOCR     │───→│  GPT-4o-mini │───→│   Pydantic   │
 │   Image     │    │  (local)     │    │   Parser     │    │ Validation   │
 └─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
-                                                                │
-                        ┌───────────────────────────────────────┘
-                        │ (on validation failure)
-                        ▼
-        ┌───────────────────────────────┐
-        │    Error-Driven Retries       │
-        │  1. LLM Self-Correction      │
-        │  2. RAG with Focused Context │
-        │  3. OCR Fallback (Vision API)│
-        └───────────────────────────────┘
+                        │                                            │
+                        │ (low quality)                              │ (fails)
+                        ▼                                            │
+              ┌─────────────────┐                                    │
+              │ OpenAI Vision   │◄───────────────────────────────────┘
+              │ (fallback)      │          (retry with corrections)
+              └─────────────────┘
                         │
                         ▼
         ┌───────────────────────────────┐
@@ -37,10 +36,13 @@ LLMs are powerful but unreliable in production. This codebase demonstrates patte
 ```
 
 **Key Design Decisions:**
+- **Interface-driven design**: `ImageProcessingInterface` and `ReceiptParsingInterface` enable clean dependency injection and testability
 - **Local OCR first**: EasyOCR runs locally (free, fast), falls back to OpenAI Vision only when quality is low
+- **Lazy initialization**: OCRService is only instantiated when needed, preventing heavy imports during tests
 - **Structured validation**: Pydantic models enforce schema + data types
 - **Retry strategies adapt to error severity**: Small errors → self-correction; Large errors → RAG or OCR reprocessing
 - **Always preserve parsed data**: Even failed validations return partial results for debugging
+- **Deterministic OCR scoring**: Structured scoring with clear thresholds (bad ≤0.4, medium ≥0.3, good ≥0.5)
 
 ## Prerequisites
 
@@ -56,6 +58,9 @@ cd receipts
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+
+# Install package in editable mode (enables imports without PYTHONPATH)
+pip install -e .
 
 # Configure
 export OPENAI_API_KEY="your-key-here"
@@ -214,24 +219,76 @@ python -m pytest tests/test_models.py -v
 
 ## Project Structure
 
+**Src Layout**: Application code lives under `src/` for clean imports and no module shadowing.
+
 ```
 receipts/
 ├── main.py                    # CLI entry point
-├── database_models.py         # SQLAlchemy models + DatabaseManager
-├── receipt_persistence.py     # Receipt CRUD operations
-├── token_tracking.py          # TokenUsage dataclass + cost calc
-├── token_usage_persistence.py # JSON persistence for usage
-├── pipeline/
-│   └── processor.py           # ReceiptProcessor orchestration
-├── domain/parsing/
-│   └── receipt_parser.py      # LLM parsing + retry strategies
-├── services/
-│   ├── ocr_service.py         # EasyOCR + Vision fallback
-│   ├── batch_service.py       # Multi-image processing
-│   └── token_service.py       # Usage aggregation
-├── utils/
-│   └── output_formatter.py    # Human-readable output
-└── tests/
-    ├── integration/           # End-to-end tests
-    └── services/              # Unit tests
+├── pyproject.toml             # Project configuration (pytest, dependencies)
+├── src/                       # Application source code
+│   ├── pipeline/
+│   │   └── processor.py       # ReceiptProcessor orchestration with DI
+│   ├── domain/
+│   │   ├── parsing/
+│   │   │   └── receipt_parser.py  # LLM parsing + retry strategies
+│   │   └── validation/
+│   │       └── validation_service.py  # Pydantic validation
+│   ├── services/
+│   │   ├── ocr_service.py     # EasyOCR + Vision fallback (lazy init)
+│   │   ├── batch_service.py   # Multi-image processing
+│   │   └── token_service.py   # Usage aggregation
+│   ├── contracts/
+│   │   └── interfaces.py      # ImageProcessingInterface, ReceiptParsingInterface
+│   └── image_processing.py    # VisionProcessor with DI support
+├── tests/
+│   ├── fakes/                 # Test doubles for DI
+│   │   ├── fake_vision_processor.py
+│   │   └── fake_receipt_parser.py
+│   ├── integration/           # End-to-end tests with fakes
+│   ├── domain/                # Domain layer tests
+│   └── services/              # Service layer tests
+└── imgs/                      # Place receipt images here
 ```
+
+## Development Setup
+
+The project uses a **src layout** to ensure clean imports and prevent module shadowing.
+
+### Import Resolution
+
+- **pytest** is configured via `pyproject.toml` with `testpaths = ["tests"]`
+- **pip install -e .** installs the package in editable mode, enabling imports without PYTHONPATH
+- Tests import from source modules directly: `from pipeline.processor import ReceiptProcessor`
+
+### Running Tests
+
+```bash
+# Run all tests (imports resolve via src/)
+pytest
+
+# Or explicitly
+python -m pytest tests/ -v
+
+# Run specific test modules
+pytest tests/pipeline_tests/ -v
+pytest tests/integration/ -v
+```
+
+### Running the Application
+
+```bash
+# Run directly (after pip install -e .)
+python main.py
+```
+
+### Project Configuration
+
+All project configuration is centralized in `pyproject.toml`:
+- pytest: `testpaths = ["tests"]` for test discovery
+- Build system: setuptools with src layout (via `pip install -e .`)
+
+TODO:
+- [ ] Frontend app for image ingestion
+- [ ] REST API for external integrations
+- [ ] Horizontal scaling
+- [ ] Experiment with OCR models - static rules, trained model, Vision API

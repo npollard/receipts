@@ -1,0 +1,22 @@
+[project]
+name = "receipts"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore:Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.:UserWarning:langchain_core._api.deprecation",
+    "ignore:ForwardRef._evaluate is a private API.*:DeprecationWarning:pydantic.v1.typing",
+    "ignore:'asyncio.iscoroutinefunction' is deprecated.*:DeprecationWarning:langchain_core.runnables.utils",
+]

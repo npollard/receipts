@@ -8,8 +8,7 @@ import hashlib
 import json
 
 from sqlalchemy import create_engine, Column, String, DateTime, Integer, Boolean, Text, ForeignKey, Index, Numeric, Date, JSON
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy.orm import sessionmaker, Session, relationship, declarative_base
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.sql import func
 
