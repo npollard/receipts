@@ -1,153 +1,237 @@
 # Receipts
-AI-powered receipt processing to track grocery spending.
 
-Exploring production-grade LLM workflows with validation, retries, persistence, and cost tracking.
+AI-powered receipt processing system exploring **production-grade LLM workflows**—reliability, validation, error-driven retries, and cost observability.
+
+## Why This Project Exists
+
+LLMs are powerful but unreliable in production. This codebase demonstrates patterns for making AI systems robust:
+
+- **Deterministic + AI hybrid pipeline**: Local OCR (EasyOCR) first, LLM parsing second
+- **Error-driven retry orchestration**: Three strategies triggered by validation failures
+- **Graceful degradation**: Preserve partial results even when validation fails
+- **Full observability**: Token usage tracking, cost estimation, structured logging
+
+## Architecture Overview
+
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
+│   Receipt   │───→│  EasyOCR     │───→│  GPT-4o-mini │───→│   Pydantic   │
+│   Image     │    │  (local)     │    │   Parser     │    │ Validation   │
+└─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
+                                                                │
+                        ┌───────────────────────────────────────┘
+                        │ (on validation failure)
+                        ▼
+        ┌───────────────────────────────┐
+        │    Error-Driven Retries       │
+        │  1. LLM Self-Correction      │
+        │  2. RAG with Focused Context │
+        │  3. OCR Fallback (Vision API)│
+        └───────────────────────────────┘
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │   SQLite / PostgreSQL Storage  │
+        │   + Token Usage Persistence    │
+        └───────────────────────────────┘
+```
+
+**Key Design Decisions:**
+- **Local OCR first**: EasyOCR runs locally (free, fast), falls back to OpenAI Vision only when quality is low
+- **Structured validation**: Pydantic models enforce schema + data types
+- **Retry strategies adapt to error severity**: Small errors → self-correction; Large errors → RAG or OCR reprocessing
+- **Always preserve parsed data**: Even failed validations return partial results for debugging
 
 ## Prerequisites
 
-- Python 3.8+
-- OpenAI API key
+- Python 3.10+
+- OpenAI API key (for LLM parsing and OCR fallback)
 
 ## Installation
 
-> Use a project virtual environment to avoid conflicts with globally installed LangChain packages.
-
 ```bash
-# Clone the repository
+# Clone and setup
 git clone <repository-url>
 cd receipts
-
-# Create and activate a virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
-python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-# Set up environment
-export OPENAI_API_KEY="your-openai-api-key-here"
-
-# Create directory for receipt images
-mkdir -p imgs
-```
-
-### VS Code
-
-If you're using VS Code, select the workspace interpreter or let the included settings pick:
-
-```bash
-/Users/nelson/Development/receipts/.venv/bin/python
+# Configure
+export OPENAI_API_KEY="your-key-here"
+mkdir -p imgs # Place receipt images here
 ```
 
 ## Usage
 
 ```bash
-# Process all images in imgs directory
+# Process all images in imgs/
 python main.py
 
-# Show token usage summary without processing
+# Show accumulated token usage and costs -- do not process images
 python main.py --usage-summary-only
+
+# Run without database (debug mode)
+python main.py --no-db
 ```
 
-Place receipt images (.jpg, .jpeg, .png) in the `imgs/` directory and run the processor.
+Place receipt images (`.jpg`, `.jpeg`, `.png`) in `imgs/` and run.
+
+## Pipeline Details
+
+### 1. OCR: Local + Cloud Fallback
+
+**EasyOCR** (default):
+- Runs locally, no API cost
+- GPU acceleration if available
+- Quality scoring (0-1) determines if fallback needed
+
+**OpenAI Vision** (fallback):
+- Triggered when EasyOCR quality < 0.25
+- Also used in retry strategy #3
+- Higher cost but better on poor-quality images
+
+### 2. LLM Parsing: GPT-4o-mini
+
+Structures OCR text into JSON with fields:
+- `date`: ISO format date
+- `total`: Decimal amount
+- `items`: List of `{description, quantity, price}`
+
+### 3. Validation: Pydantic + Custom Rules
+
+Validates:
+- Required fields present (`date`, `total`, `items`)
+- Data types correct (Decimal for money, list for items)
+- At least 1 item in receipt
+- Total is valid numeric
+
+**On validation failure**: Parse result is preserved (not discarded) for retry analysis.
+
+### 4. Retry Orchestration: Error-Driven
+
+Up to **2 retries** per receipt, strategy selected by error severity:
+
+| Strategy | Trigger | Description |
+|----------|---------|-------------|
+| **LLM Self-Correction** | Small/medium errors | Send original text + error back to LLM with correction prompt |
+| **RAG + Focused Context** | Medium/large errors | Extract only lines near errors, re-parse with focused context |
+| **OCR Fallback** | Low OCR quality or large errors | Re-extract with OpenAI Vision, then re-parse |
+
+Token usage is **accumulated across all attempts**.
+
+### 5. Persistence: Multi-Layer
+
+**Database** (SQLite default, PostgreSQL supported):
+- Users, receipts, items with full relationships
+- Idempotency: Duplicate receipts detected by content hash
+- Processing status tracking (pending → processing → completed/failed)
+
+**Token Usage Persistence** (`token_usage.json`):
+- Cross-session cost tracking
+- Aggregated summaries (input/output/total/cost)
+
+## Observability
+
+### Token Usage & Costs
+
+Pricing (GPT-4o-mini):
+- Input: $0.15 per 1M tokens ($0.00015 per 1K)
+- Output: $0.60 per 1M tokens ($0.00060 per 1K)
+
+```bash
+$ python main.py --usage-summary-only
+==================================================
+PERSISTED USAGE SUMMARY
+==================================================
+Total Sessions: 14
+Total Input Tokens: 9850
+Total Output Tokens: 5972
+Total Tokens: 15822
+Total Estimated Cost: $5.06
+==================================================
+```
+
+### Output Format
+
+```
+==============================
+RECEIPT: grocery_2024-01.jpg
+==============================
+
+STATUS: ✅ SUCCESS
+RETRIES: LLM_SELF_CORRECTION
+
+TOTAL: $47.83
+
+ITEMS (3):
+- Milk .... $3.49
+- Eggs .... $5.99
+- Bread .... $2.50
+
+ITEM SUM: $11.98
+MISMATCH: $35.85
+
+TOKENS:
+- Input: 1247
+- Output: 423
+- Total: 1670
+```
 
 ## Testing
 
-### Integration Tests
-
-Run the integration tests with:
-
 ```bash
-python3 -m pytest -q tests/test_integration_receipt_processing.py
+# Run all tests
+python -m pytest tests/ -v
+
+# Integration tests (database, OCR, full pipeline)
+python -m pytest tests/integration/ -v
+
+# Specific modules
+python -m pytest tests/test_api_response.py -v
+python -m pytest tests/test_models.py -v
 ```
 
-Current integration coverage includes:
-- Deterministic OCR stubs
-- Deterministic LLM parsing stubs
-- Mocked token usage validation
-- Success and failure batch-processing scenarios
+## Failure Modes Handled
 
-### Unit Tests
-
-Run all unit tests with:
-
-```bash
-python3 -m pytest tests/ -v
-```
-
-Run specific test modules:
-
-```bash
-# Test API response handling
-python3 -m pytest tests/test_api_response.py -v
-
-# Test token usage tracking
-python3 -m pytest tests/test_token_tracking.py -v
-
-# Test data models
-python3 -m pytest tests/test_models.py -v
-
-# Test image processing
-python3 -m pytest tests/test_image_processing.py -v
-
-# Test receipt parsing
-python3 -m pytest tests/test_receipt_parser.py -v
-
-# Test workflow orchestration
-python3 -m pytest tests/test_workflow.py -v
-
-# Test validation utilities
-python3 -m pytest tests/test_validation_utils.py -v
-
-# Test receipt processor
-python3 -m pytest tests/test_receipt_processor.py -v
-```
-
-Unit tests provide comprehensive coverage of:
-- Individual component functionality
-- Error handling and edge cases
-- Data validation and model constraints
-- Token usage tracking and cost estimation
-- OCR and AI parsing logic with mocked dependencies
-
-## Data Flow & Orchestration
-
-```
-Images → Vision API (OCR) → OCR Text Validation → AI Parser → Validation → Retry Logic → Storage
-```
-
-**Processing Pipeline:**
-1. **Image Processing** - OpenAI Vision API extracts text from receipt images
-2. **OCR Text Validation** - Validates extracted text quality and content
-3. **AI Parsing** - GPT-4o-mini structures OCR text into JSON format
-4. **Validation** - Pydantic models validate receipt structure and data types
-5. **Retry Logic** - Up to 3 attempts with AI error-fixing for failed parses
-6. **Token Tracking** - Monitors API usage and costs across all operations
-
-**Error Recovery:**
-- Automatic retries with targeted error-fixing prompts
-- Fallback to empty structure if parsing repeatedly fails
-- Detailed logging for debugging failed receipts
-
-## Token Usage & Costs
-
-The system tracks OpenAI API usage:
-- **Input**: $0.15 per 1M tokens
-- **Output**: $0.60 per 1M tokens
-- Usage persists across sessions for cost analysis
-
-## Output
-
-Successfully parsed receipts include:
-- Date, total amount, and itemized list
-- Token usage statistics
-- Processing status and any error details
+| Issue | Handling |
+|-------|----------|
+| Invalid JSON from LLM | Retry with correction prompt |
+| Missing required fields | Error classification → appropriate retry |
+| 0 items extracted | Validation failure with partial data preserved |
+| OCR too short/empty | Quality score triggers Vision fallback |
+| Total ≠ sum(items) | Displayed as mismatch, not a hard failure |
+| Duplicate receipt | Idempotency check prevents re-processing |
+| Database unavailable | `--no-db` flag enables file-only mode |
 
 ## TODO
-- [ ] Implement database persistence for processed receipts
-- [ ] Experiment with a local OCR model for cost reduction
-- [ ] Create mobile app for uploading receipts
-- [ ] Create identity management for users
-- [ ] Architect for scalability and performance
-- [ ] Add REST API for BI on receipt data
+
+- [ ] Experiment with PaddleOCR for cost/quality comparison
+- [ ] Mobile app for receipt upload
+- [ ] REST API for external integrations
+- [ ] Multi-user identity management (auth)
+- [ ] Horizontal scaling architecture
+
+## Project Structure
+
+```
+receipts/
+├── main.py                    # CLI entry point
+├── database_models.py         # SQLAlchemy models + DatabaseManager
+├── receipt_persistence.py     # Receipt CRUD operations
+├── token_tracking.py          # TokenUsage dataclass + cost calc
+├── token_usage_persistence.py # JSON persistence for usage
+├── pipeline/
+│   └── processor.py           # ReceiptProcessor orchestration
+├── domain/parsing/
+│   └── receipt_parser.py      # LLM parsing + retry strategies
+├── services/
+│   ├── ocr_service.py         # EasyOCR + Vision fallback
+│   ├── batch_service.py       # Multi-image processing
+│   └── token_service.py       # Usage aggregation
+├── utils/
+│   └── output_formatter.py    # Human-readable output
+└── tests/
+    ├── integration/           # End-to-end tests
+    └── services/              # Unit tests
+```
