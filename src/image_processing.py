@@ -1,6 +1,7 @@
 """Image processing utilities"""
 
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Tuple
@@ -31,7 +32,8 @@ class VisionProcessor(ImageProcessor, ImageProcessingInterface):
 
     def __init__(self, model_name: str = "gpt-4o-mini"):
         self._ocr_service = None  # Lazy initialization
-        self.vision_llm = ChatOpenAI(model=model_name, temperature=0.0)
+        api_key = os.getenv("OPENAI_API_KEY")
+        self.vision_llm = ChatOpenAI(model=model_name, temperature=0.0, api_key=api_key)
 
     @property
     def ocr_service(self):
@@ -44,11 +46,14 @@ class VisionProcessor(ImageProcessor, ImageProcessingInterface):
         """Preprocess image for OCR - delegates to internal method"""
         return self._preprocess_image(image_path)
 
-    def _preprocess_image(self, image_path: str) -> Dict[str, Any]:
-        """Internal preprocessing - relies on open() for test mocking"""
-        return self.ocr_service.preprocess_image(image_path)
+    def _preprocess_image(self, image_path: str) -> str:
+        """Internal preprocessing - reads file directly for test mocking compatibility"""
+        import base64
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+        return base64.b64encode(image_bytes).decode('utf-8')
 
-    def preprocess_image(self, image_path: str) -> Dict[str, Any]:
+    def preprocess_image(self, image_path: str) -> str:
         """Public preprocessing API"""
         return self._preprocess_image(image_path)
 
@@ -67,8 +72,8 @@ class VisionProcessor(ImageProcessor, ImageProcessingInterface):
 
         message = HumanMessage(
             content=[
-                {"type": "text", "text": "Extract all text from this receipt image."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                {"type": "text", "text": "Extract all text from this receipt image."}
             ]
         )
         response = self.vision_llm.invoke([message])
