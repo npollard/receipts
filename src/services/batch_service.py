@@ -182,7 +182,7 @@ class BatchProcessingService(BatchProcessingInterface):
     def __init__(self, runtime_config: Optional[RuntimeConfig] = None):
         self.logger = logger
         self.config = runtime_config or get_runtime_config()
-        self.logger.info(f"BatchProcessingService initialized with {self.config.get_summary()}")
+        self.logger.debug(f"BatchProcessingService initialized with {self.config.get_summary()}")
 
     def process_batch(
         self,

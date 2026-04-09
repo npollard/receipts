@@ -303,24 +303,27 @@ def print_batch_summary(successful: int, failed: int, total: int):
     batch_service.print_batch_summary(successful, failed, total)
 
 
-def print_token_usage_summary(token_usage: TokenUsage):
+def print_token_usage_summary(token_usage: TokenUsage, token_service: TokenUsageService = None):
     """Print token usage summary for current batch"""
-    token_service = TokenUsageService()
-    token_service.print_usage_summary(token_usage)
+    if token_service is None:
+        token_service = TokenUsageService()
+    token_service.print_usage_summary(show_persisted=False)
 
 
-def save_token_usage_to_persistence(token_usage: TokenUsage):
+def save_token_usage_to_persistence(token_usage: TokenUsage, token_service: TokenUsageService = None):
     """Save token usage to persistent storage"""
     import uuid
-    token_service = TokenUsageService()
+    if token_service is None:
+        token_service = TokenUsageService()
     # Use a default user ID when running without database
     default_user_id = uuid.uuid4()
     token_service.save_token_usage_to_persistence(default_user_id, token_usage)
 
 
-def print_usage_summary(show_persisted: bool = False):
+def print_usage_summary(show_persisted: bool = False, token_service: TokenUsageService = None):
     """Print token usage summary from persistent storage"""
-    token_service = TokenUsageService()
+    if token_service is None:
+        token_service = TokenUsageService()
     token_service.print_usage_summary(show_persisted)
 
 

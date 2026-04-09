@@ -46,7 +46,7 @@ class TokenUsageService:
                 session_id=session_id
             )
 
-            self.logger.info(f"Token usage for user {user_id}: "
+            self.logger.debug(f"Token usage saved for user {user_id}: "
                            f"Input: {token_usage.input_tokens}, "
                            f"Output: {token_usage.output_tokens}, "
                            f"Total: {token_usage.get_total_tokens()}")

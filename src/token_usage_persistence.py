@@ -48,7 +48,7 @@ class TokenUsagePersistence:
             with open(self.storage_path, 'w') as f:
                 json.dump(existing_data, f, indent=2)
 
-            logger.info(f"Saved token usage for session {session_id or 'latest'}")
+            logger.debug(f"Saved token usage for session {session_id or 'latest'}")
             return True
 
         except Exception as e:

@@ -27,14 +27,13 @@ from typing import List, Dict, Any
 from pipeline.processor import (
     ReceiptProcessor,
     validate_and_get_image_files,
-    print_batch_summary,
-    print_token_usage_summary,
     save_token_usage_to_persistence,
     print_usage_summary
 )
 from image_processing import VisionProcessor
 from domain.parsing.receipt_parser import ReceiptParser
 from services.batch_service import BatchProcessingService
+from services.token_service import TokenUsageService
 from database_models import DatabaseManager
 from config import DATABASE_URL, IS_TEST, app_config, get_runtime_config
 
@@ -47,7 +46,7 @@ setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
 
 # Log the runtime configuration
-logger.info(_runtime_config.get_summary())
+logger.debug(_runtime_config.get_summary())
 
 
 def main():
@@ -72,7 +71,7 @@ def main():
     if not args.no_db:
         db_manager = DatabaseManager()
         db_manager.create_tables()
-        logger.info(f"Database initialized: {db_manager.database_path or DATABASE_URL}")
+        logger.debug(f"Database initialized: {db_manager.database_path or DATABASE_URL}")
 
     # Initialize processor with database support and dependency injection
     image_processor = VisionProcessor()
@@ -104,17 +103,14 @@ def main():
     batch_service = BatchProcessingService(runtime_config=_runtime_config)
     successful, failed, token_usage = batch_service.process_batch(image_files)
 
-    # Print batch summary
-    print_batch_summary(successful, failed, len(image_files))
-
-    # Print current batch token usage
-    print_token_usage_summary(token_usage)
+    # Use single TokenUsageService instance for persistence and summary
+    token_service = TokenUsageService()
 
     # Save token usage to persistence
-    save_token_usage_to_persistence(token_usage)
+    save_token_usage_to_persistence(token_usage, token_service=token_service)
 
-    # Print persisted usage summary
-    print_usage_summary(show_persisted=True)
+    # Print persisted usage summary (includes current batch)
+    print_usage_summary(show_persisted=True, token_service=token_service)
 
 
 if __name__ == "__main__":
