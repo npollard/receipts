@@ -1199,36 +1199,12 @@ class OCRService(ImageProcessingInterface):
         raw_total = length_score + price_score + total_score + word_quality_score - noise_penalty
         final_score = max(0.0, min(1.0, raw_total / 100.0))  # Normalize to 0-1
 
-        # Calibration adjustments
-        price_score_norm = price_score / 25.0
-        total_score_norm = total_score / 20.0
+        # Strict price detection for guard condition (not loose price_score)
+        real_price_matches = len(re.findall(r"\b\d+\.\d{2}\b", text))
 
-        # Hard rejection: non-receipt text
-        if total_score_norm == 0 and price_score_norm < 0.3:
+        # Reject structured non-receipt text (no real prices + no totals)
+        if real_price_matches == 0 and total_score == 0:
             final_score = min(final_score, 0.4)
-
-        # Stronger rejection for structured non-receipt text
-        if total_score_norm == 0 and price_score_norm < 0.2 and len(text.strip()) > 50:
-            final_score = min(final_score, 0.35)
-
-        # Noise clamp
-        if noise_penalty >= 4.0:
-            final_score = min(final_score, 0.3)
-
-        # Keywords without prices clamp (descriptive text with receipt words)
-        if total_score_norm > 0 and price_score_norm < 0.2 and len(text.strip()) > 100:
-            final_score = min(final_score, 0.4)
-
-        # Strengthen medium text floor
-        if final_score < 0.3 and price_score_norm >= 0.3:
-            final_score = 0.3
-
-        # Boost structured receipts
-        if total_score_norm > 0 and price_score_norm > 0.3:
-            final_score = max(final_score, 0.5)
-
-        # Clamp final
-        final_score = max(0.0, min(1.0, final_score))
 
         # Debug output
         if debug:
@@ -1288,9 +1264,13 @@ class OCRService(ImageProcessingInterface):
 
     def _score_total_keyword(self, text: str) -> float:
         """Score total keywords (0-20 points)"""
-        total_keywords = ['total', 'amount', 'sum', 'subtotal']
+        total_keywords = ['total', 'amount', 'subtotal']
         text_lower = text.lower()
-        total_count = sum(1 for keyword in total_keywords if keyword in text_lower)
+        words = re.findall(r"\b\w+\b", text_lower)
+        total_count = sum(
+            1 for keyword in total_keywords
+            if keyword in words
+        )
         # Boost weight: 7 points per keyword to ensure >= 0.6 with 2 keywords
         return min(total_count * 7, 20)
 
