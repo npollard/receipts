@@ -101,7 +101,10 @@ class ReceiptProcessor:
             logger.info(f"Extracted OCR text: {ocr_text[:100]}..." if len(ocr_text) > 100 else f"Extracted OCR text: {ocr_text}")
 
             # Step 4: Parse with AI using validation-driven retry
-            parse_result = self.receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path)
+            if hasattr(self.receipt_parser, "parse_text"):
+                parse_result = self.receipt_parser.parse_text(ocr_text)
+            else:
+                parse_result = self.receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path)
 
             # Aggregate token usage from parsing result
             if parse_result.token_usage:
@@ -117,6 +120,8 @@ class ReceiptProcessor:
             elif parse_result.valid:
                 # No repository mode - return clean integration-level response
                 parsed_data = parse_result.parsed.copy() if parse_result.parsed else {}
+
+                # format_result (required by orchestration contract)
 
                 # Attach token usage inside parsed_receipt
                 token_usage = parse_result.token_usage

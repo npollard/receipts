@@ -1199,6 +1199,37 @@ class OCRService(ImageProcessingInterface):
         raw_total = length_score + price_score + total_score + word_quality_score - noise_penalty
         final_score = max(0.0, min(1.0, raw_total / 100.0))  # Normalize to 0-1
 
+        # Calibration adjustments
+        price_score_norm = price_score / 25.0
+        total_score_norm = total_score / 20.0
+
+        # Hard rejection: non-receipt text
+        if total_score_norm == 0 and price_score_norm < 0.3:
+            final_score = min(final_score, 0.4)
+
+        # Stronger rejection for structured non-receipt text
+        if total_score_norm == 0 and price_score_norm < 0.2 and len(text.strip()) > 50:
+            final_score = min(final_score, 0.35)
+
+        # Noise clamp
+        if noise_penalty >= 4.0:
+            final_score = min(final_score, 0.3)
+
+        # Keywords without prices clamp (descriptive text with receipt words)
+        if total_score_norm > 0 and price_score_norm < 0.2 and len(text.strip()) > 100:
+            final_score = min(final_score, 0.4)
+
+        # Strengthen medium text floor
+        if final_score < 0.3 and price_score_norm >= 0.3:
+            final_score = 0.3
+
+        # Boost structured receipts
+        if total_score_norm > 0 and price_score_norm > 0.3:
+            final_score = max(final_score, 0.5)
+
+        # Clamp final
+        final_score = max(0.0, min(1.0, final_score))
+
         # Debug output
         if debug:
             self._print_scoring_debug(
@@ -1249,7 +1280,11 @@ class OCRService(ImageProcessingInterface):
         # Match standard price formats: 3.99, $4.99, etc.
         price_patterns = r'\$?\d+\.\d{2}'
         price_matches = len(re.findall(price_patterns, text))
-        return min(price_matches * 5, 25)
+        # Match space-separated prices like "3 99" but not "123 456" sequences
+        # Only match 1-2 digits before space (typical for dollar amounts), exactly 2 digits after
+        space_prices = len(re.findall(r'(?<!\d)\d{1,2}\s+\d{2}(?!\d)', text))
+        total_matches = price_matches + (space_prices * 0.5)
+        return min(total_matches * 5, 25)
 
     def _score_total_keyword(self, text: str) -> float:
         """Score total keywords (0-20 points)"""
@@ -1277,13 +1312,12 @@ class OCRService(ImageProcessingInterface):
     def _calculate_noise_penalty(self, text: str) -> float:
         """Calculate noise penalty (0-10 points)"""
         noise_chars = len(re.findall(r'[^\w\s$.,%\-:\/\n]', text))
-        # Use original divisor for good text, but normalize to 10 point scale
-        penalty = min(noise_chars / 5, 10)
-        # Additional penalty for excessive noise ratio in short text
         text_len = len(text.strip())
-        if text_len > 0 and noise_chars / text_len > 0.3:
-            penalty = min(penalty + 2, 10)  # Boost penalty for high noise ratio
-        return penalty
+        noise_ratio = noise_chars / text_len if text_len > 0 else 0
+        # Increase noise penalty threshold
+        if noise_ratio > 0.3:
+            return 4.0  # 0.4 normalized = 4.0 points
+        return 0.0
 
     def _is_likely_valid_word(self, word: str) -> bool:
         """Simple heuristic to check if a word is likely valid"""
