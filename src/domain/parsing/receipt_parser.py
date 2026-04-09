@@ -78,7 +78,7 @@ Expected JSON format:
     ]
 }
 """
-        logger.info(f"Initialized ReceiptParser with model: {model_name}")
+        logger.debug(f"Initialized ReceiptParser with model: {model_name}")
 
     def _classify_validation_error(self, error_message: str) -> Dict[str, Any]:
         """Classify validation error severity and extract mismatch amount"""
@@ -146,7 +146,7 @@ Expected JSON format:
 
             response = self.llm.invoke(messages)
             input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-            logger.info(f"LLM self-correction retry - Token usage - Input: {input_tokens}, Output: {output_tokens}")
+            logger.debug(f"LLM self-correction retry - Token usage - Input: {input_tokens}, Output: {output_tokens}")
             result.token_usage.add_usage(input_tokens, output_tokens)
             self.token_usage.add_usage(input_tokens, output_tokens)
 
@@ -225,7 +225,7 @@ Expected JSON format:
 
             response = self.llm.invoke(messages)
             input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-            logger.info(f"RAG retry - Token usage - Input: {input_tokens}, Output: {output_tokens}")
+            logger.debug(f"RAG retry - Token usage - Input: {input_tokens}, Output: {output_tokens}")
             result.token_usage.add_usage(input_tokens, output_tokens)
             self.token_usage.add_usage(input_tokens, output_tokens)
 
@@ -293,7 +293,7 @@ Expected JSON format:
 
             response = self.llm.invoke(messages)
             input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-            logger.info(f"OCR fallback - Token usage - Input: {input_tokens}, Output: {output_tokens}")
+            logger.debug(f"OCR fallback - Token usage - Input: {input_tokens}, Output: {output_tokens}")
             result.token_usage.add_usage(input_tokens, output_tokens)
             self.token_usage.add_usage(input_tokens, output_tokens)
 
@@ -543,7 +543,7 @@ Remember: Return ONLY: JSON object, nothing else.
             # Extract token usage from response
             try:
                 input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-                logger.info(f"Token usage - Input: {input_tokens}, Output: {output_tokens}")
+                logger.debug(f"Token usage - Input: {input_tokens}, Output: {output_tokens}")
                 result.token_usage.add_usage(input_tokens, output_tokens)
                 self.token_usage.add_usage(input_tokens, output_tokens)
             except Exception as e:

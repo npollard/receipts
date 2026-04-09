@@ -101,7 +101,11 @@ def main():
     # Process batch using controlled concurrency
     # BatchProcessingService is the SINGLE layer controlling parallelism
     batch_service = BatchProcessingService(runtime_config=_runtime_config)
-    successful, failed, token_usage = batch_service.process_batch(image_files)
+    successful, failed, token_usage, observability = batch_service.process_batch(image_files)
+
+    # Print clean batch summary
+    if observability:
+        batch_service.print_batch_summary_clean(observability)
 
     # Use single TokenUsageService instance for persistence and summary
     token_service = TokenUsageService()

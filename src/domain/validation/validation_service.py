@@ -49,18 +49,18 @@ class ValidationService:
             return APIResponse.success(data)
 
         except ValidationError as e:
-            # Log detailed validation errors
+            # Log detailed validation errors at debug level to reduce spam
             error_details = e.errors()
-            logger.error(f"Validation failed with {len(error_details)} errors:")
+            logger.debug(f"Validation failed with {len(error_details)} errors:")
             for i, error in enumerate(error_details, 1):
                 loc = error.get('loc', ['unknown'])
                 field = loc[0] if isinstance(loc, (list, tuple)) and len(loc) > 0 else (str(loc) if loc else 'unknown')
                 message = error.get('msg', 'unknown error')
                 error_type = error.get('type', 'unknown')
-                logger.error(f"  Error {i}: Field '{field}' - {message} (type: {error_type})")
+                logger.debug(f"  Error {i}: Field '{field}' - {message} (type: {error_type})")
 
             # Return validation failure WITH the parsed data for preservation
-            logger.error(f"Validation failed: {str(e)}")
+            logger.debug(f"Validation failed: {str(e)}")
             logger.info(f"Preserving parsed data despite validation failure: {parsed_data}")
             return APIResponse.failure("Validation failed", data=parsed_data)
         except Exception as e:

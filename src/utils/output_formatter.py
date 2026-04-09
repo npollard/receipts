@@ -43,6 +43,22 @@ def format_receipt_result(result: Dict[str, Any]) -> str:
     else:
         retry_str = "NONE"
     output.append(f"RETRIES: {retry_str}")
+
+    # OCR decision trace
+    ocr_method = result.get('ocr_method', 'unknown')
+    ocr_attempted = result.get('ocr_attempted_methods', [])
+    ocr_quality = result.get('ocr_quality_score', 0.0)
+
+    if ocr_attempted:
+        attempted_str = " → ".join(ocr_attempted)
+    else:
+        attempted_str = ocr_method
+
+    output.append("")
+    output.append("OCR:")
+    output.append(f"  Attempted: {attempted_str}")
+    output.append(f"  Selected: {ocr_method}")
+    output.append(f"  Quality Score: {ocr_quality:.2f}")
     output.append("")
 
     # Receipt details - display parsed data regardless of validation status
@@ -111,11 +127,34 @@ def format_receipt_result(result: Dict[str, Any]) -> str:
         output.append(f"- Output: {output_tokens}")
         output.append(f"- Total: {total_tokens}")
 
-    # Error if exists
+    # Validation summary
     if validation_error:
         output.append("")
-        output.append("ERROR:")
-        output.append(validation_error)
+        output.append("VALIDATION:")
+
+        # Parse mismatch information from error message
+        import re
+        mismatch_pattern = r'Total ([\d.,]+) does not match sum of items ([\d.,]+)'
+        match = re.search(mismatch_pattern, str(validation_error))
+
+        if match:
+            total = match.group(1)
+            items_sum = match.group(2)
+            try:
+                diff = abs(Decimal(total.replace(',', '.')) - Decimal(items_sum.replace(',', '.')))
+                output.append(f"  Status: FAILED")
+                output.append(f"  Reason: Total mismatch (${total} vs ${items_sum})")
+                output.append(f"  Difference: ${diff:.2f}")
+            except (ValueError, TypeError):
+                output.append(f"  Status: FAILED")
+                output.append(f"  Reason: Total mismatch")
+        else:
+            output.append(f"  Status: FAILED")
+            # Extract clean reason from error message
+            reason = str(validation_error).replace("Validation failed: ", "").replace("Self-correction validation failed: ", "").replace("RAG validation failed: ", "").replace("OCR fallback validation failed: ", "").replace("Response content validation failed: ", "")
+            if len(reason) > 80:
+                reason = reason[:77] + "..."
+            output.append(f"  Reason: {reason}")
 
     output.append("")
     return "\n".join(output)

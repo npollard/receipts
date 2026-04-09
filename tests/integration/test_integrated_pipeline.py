@@ -33,7 +33,7 @@ def test_integrated_pipeline_with_fakes():
     image_paths = ["/dummy/path/receipt1.jpg", "/dummy/path/receipt2.jpg"]
 
     # Run the pipeline - completes in milliseconds
-    successful, failed, token_usage = batch_service.process_batch(
+    successful, failed, token_usage, _ = batch_service.process_batch(
         image_paths, image_processor, receipt_parser
     )
 
@@ -81,7 +81,7 @@ def test_pipeline_with_mixed_success_and_failure():
     batch_service = BatchProcessingService()
     image_paths = ["/dummy/path/receipt1.jpg", "/dummy/path/receipt2.jpg"]
 
-    successful, failed, token_usage = batch_service.process_batch(
+    successful, failed, token_usage, _ = batch_service.process_batch(
         image_paths, image_processor, receipt_parser
     )
 

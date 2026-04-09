@@ -50,6 +50,12 @@ class ProcessingResult:
     processing_time_ms: float
     ocr_method: str = "unknown"
     ocr_duration_ms: float = 0.0
+    ocr_attempted_methods: List[str] = None
+    ocr_quality_score: float = 0.0
+
+    def __post_init__(self):
+        if self.ocr_attempted_methods is None:
+            self.ocr_attempted_methods = []
 
 
 @dataclass
@@ -118,8 +124,11 @@ def _process_single_image_worker(
         ocr_text = image_processor.extract_text(image_path_str)
         ocr_duration = (time.time() - ocr_start) * 1000
 
-        # Get OCR method from observability (stored on ocr_service during extraction)
-        ocr_method = getattr(ocr_service, '_last_ocr_method', 'easyocr')
+        # Get OCR observability data (stored on ocr_service during extraction)
+        ocr_obs = getattr(ocr_service, '_last_observability', None)
+        ocr_method = ocr_obs.method if ocr_obs else 'easyocr'
+        ocr_attempted_methods = ocr_obs.attempted_methods if ocr_obs else ['easyocr']
+        ocr_quality_score = ocr_obs.quality_score if ocr_obs else 0.0
 
         # Parse receipt
         result = receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path_str)
@@ -154,6 +163,8 @@ def _process_single_image_worker(
             processing_time_ms=processing_time,
             ocr_method=ocr_method,
             ocr_duration_ms=ocr_duration,
+            ocr_attempted_methods=ocr_attempted_methods,
+            ocr_quality_score=ocr_quality_score,
         )
 
     except Exception as e:
@@ -169,6 +180,8 @@ def _process_single_image_worker(
             processing_time_ms=processing_time,
             ocr_method="error",
             ocr_duration_ms=0.0,
+            ocr_attempted_methods=[],
+            ocr_quality_score=0.0,
         )
 
 
@@ -189,7 +202,7 @@ class BatchProcessingService(BatchProcessingInterface):
         image_files: List[Path],
         image_processor: Optional[ImageProcessingInterface] = None,
         receipt_parser: Optional[ReceiptParsingInterface] = None,
-    ) -> Tuple[int, int, TokenUsage]:
+    ) -> Tuple[int, int, TokenUsage, Optional[BatchObservability]]:
         """Process multiple images with controlled concurrency
 
         Args:
@@ -198,11 +211,11 @@ class BatchProcessingService(BatchProcessingInterface):
             receipt_parser: Optional custom receipt parser (for testing with fakes)
 
         Returns:
-            Tuple of (successful_count, failed_count, total_token_usage)
+            Tuple of (successful_count, failed_count, total_token_usage, observability)
         """
         if not image_files:
             self.logger.warning("No images to process")
-            return 0, 0, TokenUsage()
+            return 0, 0, TokenUsage(), None
 
         total_images = len(image_files)
         self.logger.info(f"Processing {total_images} images with mode={self.config.mode.value}, "
@@ -252,10 +265,10 @@ class BatchProcessingService(BatchProcessingInterface):
             ocr_breakdown=ocr_breakdown,
         )
 
-        # Log detailed summary
+        # Log detailed summary (debug only)
         self._log_batch_summary(results, observability)
 
-        return successful_processes, failed_processes, total_token_usage
+        return successful_processes, failed_processes, total_token_usage, observability
 
     def _process_parallel(
         self,
@@ -267,16 +280,17 @@ class BatchProcessingService(BatchProcessingInterface):
 
         with ProcessPoolExecutor(max_workers=self.config.max_workers) as executor:
             # Submit all tasks
-            future_to_path = {
-                executor.submit(
+            future_to_path = {}
+            for image_path in image_files:
+                self._print_processing_header(image_path)
+                future = executor.submit(
                     _process_single_image_worker,
                     str(image_path),
                     self.config.mode.value,
                     self.config.max_workers,
                     self.config.ocr_threads,
-                ): image_path
-                for image_path in image_files
-            }
+                )
+                future_to_path[future] = image_path
 
             # Collect results as they complete
             for future in as_completed(future_to_path):
@@ -303,6 +317,8 @@ class BatchProcessingService(BatchProcessingInterface):
                         processing_time_ms=0.0,
                         ocr_method="error",
                         ocr_duration_ms=0.0,
+                        ocr_attempted_methods=[],
+                        ocr_quality_score=0.0,
                     )
                     results.append(error_result)
                     ocr_breakdown["error"] = ocr_breakdown.get("error", 0) + 1
@@ -318,6 +334,7 @@ class BatchProcessingService(BatchProcessingInterface):
         results = []
 
         for image_path in image_files:
+            self._print_processing_header(image_path)
             result = _process_single_image_worker(
                 str(image_path),
                 self.config.mode.value,
@@ -333,6 +350,15 @@ class BatchProcessingService(BatchProcessingInterface):
             ocr_breakdown[result.ocr_method] = ocr_breakdown.get(result.ocr_method, 0) + 1
 
         return results
+
+    def _print_processing_header(self, image_path: Path) -> None:
+        """Print structured header before processing a receipt"""
+        filename = image_path.name
+        print(f"\n{'='*60}")
+        print(f"PROCESSING: {filename}")
+        print(f"{'='*60}")
+        print("PIPELINE:")
+        print("- OCR → Parsing → Validation")
 
     def _print_result(self, result: ProcessingResult) -> None:
         """Print formatted result for a single image"""
@@ -352,6 +378,8 @@ class BatchProcessingService(BatchProcessingInterface):
             'processing_time_ms': round(result.processing_time_ms, 1),
             'ocr_method': result.ocr_method,
             'ocr_duration_ms': round(result.ocr_duration_ms, 1),
+            'ocr_attempted_methods': result.ocr_attempted_methods,
+            'ocr_quality_score': result.ocr_quality_score,
         }
 
         print(format_receipt_result(formatted))
@@ -412,6 +440,8 @@ class BatchProcessingService(BatchProcessingInterface):
                     processing_time_ms=processing_time,
                     ocr_method='fake',
                     ocr_duration_ms=ocr_duration,
+                    ocr_attempted_methods=['fake'],
+                    ocr_quality_score=0.0,
                 )
 
                 results.append(processing_result)
@@ -432,6 +462,8 @@ class BatchProcessingService(BatchProcessingInterface):
                     processing_time_ms=0.0,
                     ocr_method="error",
                     ocr_duration_ms=0.0,
+                    ocr_attempted_methods=[],
+                    ocr_quality_score=0.0,
                 )
                 results.append(error_result)
                 ocr_breakdown["error"] = ocr_breakdown.get("error", 0) + 1
@@ -443,15 +475,15 @@ class BatchProcessingService(BatchProcessingInterface):
         results: List[ProcessingResult],
         obs: BatchObservability,
     ) -> None:
-        """Log detailed batch summary"""
-        logger.info("=" * 60)
-        logger.info("BATCH PROCESSING COMPLETE")
-        logger.info(f"Total: {obs.total_images} | Successful: {obs.successful} | Failed: {obs.failed}")
-        logger.info(f"Success Rate: {(obs.successful/obs.total_images*100):.1f}%")
-        logger.info(f"Total Time: {obs.total_time_ms:.1f}ms | Avg per image: {obs.avg_time_per_image_ms:.1f}ms")
-        logger.info(f"Tokens: {obs.total_tokens.get_total_tokens():,} total")
-        logger.info(f"OCR Methods: {obs.ocr_breakdown}")
-        logger.info("=" * 60)
+        """Log detailed batch summary at debug level to reduce output noise"""
+        logger.debug("=" * 60)
+        logger.debug("BATCH PROCESSING COMPLETE")
+        logger.debug(f"Total: {obs.total_images} | Successful: {obs.successful} | Failed: {obs.failed}")
+        logger.debug(f"Success Rate: {(obs.successful/obs.total_images*100):.1f}%")
+        logger.debug(f"Total Time: {obs.total_time_ms:.1f}ms | Avg per image: {obs.avg_time_per_image_ms:.1f}ms")
+        logger.debug(f"Tokens: {obs.total_tokens.get_total_tokens():,} total")
+        logger.debug(f"OCR Methods: {obs.ocr_breakdown}")
+        logger.debug("=" * 60)
 
     def validate_image_files(self, imgs_dir: Path) -> List[Path]:
         """Validate and get list of image files to process"""
@@ -482,7 +514,7 @@ Success Rate: {(successful/total*100):.1f}%
         return summary
 
     def print_batch_summary(self, successful: int, failed: int, total: int):
-        """Print batch processing summary"""
+        """Print batch processing summary (legacy - use print_batch_summary_clean instead)"""
         logger.info("=" * 50)
         logger.info("BATCH PROCESSING COMPLETE")
         logger.info(f"Successful: {successful}")
@@ -490,6 +522,48 @@ Success Rate: {(successful/total*100):.1f}%
         logger.info(f"Total: {total}")
         logger.info(f"Success Rate: {(successful/total*100):.1f}%")
         logger.info("=" * 50)
+
+    def print_batch_summary_clean(self, observability: BatchObservability) -> None:
+        """Print clean, readable batch summary"""
+        total = observability.total_images
+        successful = observability.successful
+        failed = observability.failed
+        success_rate = (successful / total * 100) if total > 0 else 0
+
+        # Format times
+        total_time_s = observability.total_time_ms / 1000
+        avg_time_s = observability.avg_time_per_image_ms / 1000
+
+        # Format OCR breakdown
+        ocr_lines = []
+        for method, count in sorted(observability.ocr_breakdown.items()):
+            ocr_lines.append(f"  {method}: {count}")
+
+        print()
+        print("=" * 50)
+        print("BATCH SUMMARY")
+        print("=" * 50)
+        print()
+        print(f"Total: {total}")
+        print(f"Success: {successful}")
+        print(f"Failed: {failed}")
+        print(f"Success Rate: {success_rate:.0f}%")
+        print()
+        print("Performance:")
+        print(f"  Total Time: {total_time_s:.1f}s")
+        print(f"  Avg/Image: {avg_time_s:.1f}s")
+        print()
+        print("OCR Usage:")
+        if ocr_lines:
+            for line in ocr_lines:
+                print(line)
+        else:
+            print("  N/A")
+        print()
+        print("Tokens:")
+        print(f"  Total: {observability.total_tokens.get_total_tokens():,}")
+        print()
+        print("=" * 50)
 
     def print_processing_result(self, result: APIResponse, image_files: List[Path], index: int):
         """Print the result of processing a single image"""

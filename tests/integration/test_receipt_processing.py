@@ -134,7 +134,7 @@ def test_process_batch_images_aggregates_stubbed_token_usage(monkeypatch, tmp_pa
     image_processor = VisionProcessor()
     receipt_parser = ReceiptParser()
     batch_service = BatchProcessingService()
-    successful, failed, token_usage = batch_service.process_batch(
+    successful, failed, token_usage, _ = batch_service.process_batch(
         image_paths, image_processor, receipt_parser
     )
 
@@ -202,7 +202,7 @@ def test_process_batch_images_tracks_only_successful_token_usage_when_one_parse_
     image_processor = VisionProcessor()
     receipt_parser = ReceiptParser()
     batch_service = BatchProcessingService()
-    successful, failed, token_usage = batch_service.process_batch(
+    successful, failed, token_usage, _ = batch_service.process_batch(
         image_paths, image_processor, receipt_parser
     )
 
