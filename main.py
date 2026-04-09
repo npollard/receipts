@@ -16,11 +16,6 @@ from config.runtime_config import create_config_from_env, enforce_thread_limits
 # Create runtime config and enforce thread limits
 _runtime_config = create_config_from_env()
 enforce_thread_limits(_runtime_config)
-
-# Log config early
-print(_runtime_config.get_summary(), file=sys.stderr)
-print(f"\nThread limits enforced before any heavy imports.", file=sys.stderr)
-print("THREADS:", torch.get_num_threads(), os.environ.get("OMP_NUM_THREADS")) 
 # =============================================================================
 
 import argparse

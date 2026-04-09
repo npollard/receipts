@@ -15,7 +15,7 @@ class TokenUsagePersistence:
     def __init__(self, storage_path: str = "token_usage.json"):
         self.storage_path = Path(storage_path)
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Initialized TokenUsagePersistence with storage: {storage_path}")
+        logger.debug(f"Initialized TokenUsagePersistence with storage: {storage_path}")
 
     def save_usage(self, token_usage: TokenUsage, session_id: str = None) -> bool:
         """Save token usage to persistent storage"""
