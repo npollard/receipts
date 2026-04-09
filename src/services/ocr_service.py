@@ -302,11 +302,6 @@ class OCRService(ImageProcessingInterface):
         logger.debug(f"Fallback Error: {str(fallback_error)}")
         logger.debug("="*60)
 
-    def _extract_with_quality_fallback(self, image_path: str) -> str:
-        """Extract text using EasyOCR with automatic fallback to Vision OCR based on quality score"""
-        text, _, _ = self._extract_with_quality_fallback_observable(image_path)
-        return text
-
     def _extract_with_quality_fallback_observable(self, image_path: str) -> Tuple[str, str, float]:
         """Extract text with observability - returns (text, method_used, quality_score)"""
         try:
