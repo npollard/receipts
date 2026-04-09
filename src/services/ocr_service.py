@@ -1199,11 +1199,12 @@ class OCRService(ImageProcessingInterface):
         raw_total = length_score + price_score + total_score + word_quality_score - noise_penalty
         final_score = max(0.0, min(1.0, raw_total / 100.0))  # Normalize to 0-1
 
-        # Strict price detection for guard condition (not loose price_score)
-        real_price_matches = len(re.findall(r"\b\d+\.\d{2}\b", text))
+        # Final guard: receipts must have prices OR total keywords
+        has_price = bool(re.search(r"\b\d+\.\d{2}\b", text))
+        words = set(re.findall(r"\b\w+\b", text.lower()))
+        has_total = any(kw in words for kw in ["total", "subtotal", "amount"])
 
-        # Reject structured non-receipt text (no real prices + no totals)
-        if real_price_matches == 0 and total_score == 0:
+        if not has_price and not has_total:
             final_score = min(final_score, 0.4)
 
         # Debug output
@@ -1264,13 +1265,9 @@ class OCRService(ImageProcessingInterface):
 
     def _score_total_keyword(self, text: str) -> float:
         """Score total keywords (0-20 points)"""
-        total_keywords = ['total', 'amount', 'subtotal']
-        text_lower = text.lower()
-        words = re.findall(r"\b\w+\b", text_lower)
-        total_count = sum(
-            1 for keyword in total_keywords
-            if keyword in words
-        )
+        total_keywords = {"total", "subtotal", "amount"}
+        words = set(re.findall(r"\b\w+\b", text.lower()))
+        total_count = sum(1 for kw in total_keywords if kw in words)
         # Boost weight: 7 points per keyword to ensure >= 0.6 with 2 keywords
         return min(total_count * 7, 20)
 
