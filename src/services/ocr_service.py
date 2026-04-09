@@ -471,7 +471,7 @@ class OCRService(ImageProcessingInterface):
 
         except Exception as e:
             logger.error(f"OpenAI Vision API error for {image_path}: {str(e)}")
-            return f"Vision OCR Error: {str(e)}"
+            raise VisionAPIError(f"Vision OCR failed for {image_path}: {str(e)}") from e
 
     def _log_comparison(self, image_path: str, easyocr_text: str, vision_text: str):
         """Log comparison between EasyOCR and OpenAI Vision results"""
