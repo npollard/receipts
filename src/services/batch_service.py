@@ -1,21 +1,34 @@
-"""Batch processing service for coordinating multiple receipt processing operations"""
+"""Batch processing service with controlled concurrency
 
+This service is the SINGLE layer controlling parallelism in the application.
+It uses ProcessPoolExecutor for parallel processing while ensuring no nested
+parallelism occurs (OCR threads must be 1 when using multiple workers).
+"""
+
+import os
+import sys
+import time
 import logging
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
-from uuid import UUID
+from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# Add src to path for worker processes
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from contracts.interfaces import (
     ImageProcessingInterface,
     ReceiptParsingInterface,
     BatchProcessingInterface,
-    TokenUsageInterface
 )
 from tracking import TokenUsage
 from api_response import APIResponse
 from core.file_operations import get_image_files
 from core.logging import get_batch_logger
 from utils.output_formatter import format_receipt_result
+from config import get_runtime_config, RuntimeConfig
 
 # Reduce logging noise - set specific loggers to WARNING level
 logging.getLogger('services.ocr_service').setLevel(logging.WARNING)
@@ -25,82 +38,420 @@ logging.getLogger('services.retry_service').setLevel(logging.WARNING)
 logger = get_batch_logger(__name__)
 
 
+@dataclass
+class ProcessingResult:
+    """Result from processing a single image"""
+    image_path: str
+    success: bool
+    parsed_data: Dict[str, Any]
+    retries: List[str]
+    validation_error: Optional[str]
+    token_usage: TokenUsage
+    processing_time_ms: float
+    ocr_method: str = "unknown"
+    ocr_duration_ms: float = 0.0
+
+
+@dataclass
+class BatchObservability:
+    """Observability data for batch processing"""
+    total_images: int
+    successful: int
+    failed: int
+    total_time_ms: float
+    avg_time_per_image_ms: float
+    total_tokens: TokenUsage
+    ocr_breakdown: Dict[str, int]  # Count by OCR method
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'total_images': self.total_images,
+            'successful': self.successful,
+            'failed': self.failed,
+            'total_time_ms': round(self.total_time_ms, 2),
+            'avg_time_per_image_ms': round(self.avg_time_per_image_ms, 2),
+            'total_tokens': self.total_tokens.to_dict(),
+            'ocr_breakdown': self.ocr_breakdown,
+        }
+
+
+def _process_single_image_worker(
+    image_path_str: str,
+    execution_mode: str,
+    max_workers: int,
+    ocr_threads: int,
+) -> ProcessingResult:
+    """Worker function to process a single image in a separate process
+
+    This function creates its own service instances to avoid sharing
+    stateful objects across processes.
+
+    Args:
+        image_path_str: Path to the image file
+        execution_mode: Runtime execution mode
+        max_workers: Number of workers (for logging)
+        ocr_threads: Number of OCR threads (must be 1 when parallel)
+    """
+    import os
+    import sys
+    import time
+
+    # Ensure thread limits are set in worker process
+    os.environ["OMP_NUM_THREADS"] = str(ocr_threads)
+    os.environ["MKL_NUM_THREADS"] = str(ocr_threads)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(ocr_threads)
+
+    start_time = time.time()
+
+    try:
+        # Import here to ensure thread limits are set first
+        from image_processing import VisionProcessor
+        from domain.parsing.receipt_parser import ReceiptParser
+
+        # Create fresh service instances (no shared state)
+        image_processor = VisionProcessor()
+        ocr_service = image_processor.ocr_service
+        receipt_parser = ReceiptParser(ocr_service=ocr_service)
+
+        # Extract text with timing
+        ocr_start = time.time()
+        ocr_text = image_processor.extract_text(image_path_str)
+        ocr_duration = (time.time() - ocr_start) * 1000
+
+        # Get OCR method from observability (stored on ocr_service during extraction)
+        ocr_method = getattr(ocr_service, '_last_ocr_method', 'easyocr')
+
+        # Parse receipt
+        result = receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path_str)
+
+        # Determine success
+        if result.parsed is None:
+            parsed_data = {}
+        elif hasattr(result.parsed, '__dict__'):
+            parsed_data = result.parsed.__dict__
+        elif isinstance(result.parsed, dict):
+            parsed_data = result.parsed
+        else:
+            parsed_data = {}
+
+        has_meaningful_data = (
+            result.valid and
+            parsed_data and
+            parsed_data.get('items') and
+            len(parsed_data.get('items', [])) > 0 and
+            parsed_data.get('total') is not None
+        )
+
+        processing_time = (time.time() - start_time) * 1000
+
+        return ProcessingResult(
+            image_path=image_path_str,
+            success=has_meaningful_data,
+            parsed_data=parsed_data,
+            retries=receipt_parser.get_current_retries() if hasattr(receipt_parser, 'get_current_retries') else [],
+            validation_error=result.error if result.error else None,
+            token_usage=result.token_usage if result.token_usage else TokenUsage(),
+            processing_time_ms=processing_time,
+            ocr_method=ocr_method,
+            ocr_duration_ms=ocr_duration,
+        )
+
+    except Exception as e:
+        processing_time = (time.time() - start_time) * 1000
+        logger.error(f"Error processing {image_path_str}: {e}")
+        return ProcessingResult(
+            image_path=image_path_str,
+            success=False,
+            parsed_data={},
+            retries=[],
+            validation_error=str(e),
+            token_usage=TokenUsage(),
+            processing_time_ms=processing_time,
+            ocr_method="error",
+            ocr_duration_ms=0.0,
+        )
+
+
 class BatchProcessingService(BatchProcessingInterface):
-    """Service for coordinating batch processing operations"""
+    """Service for coordinating batch processing with controlled concurrency
 
-    def __init__(self):
+    This is the SINGLE layer controlling parallelism. All batch processing
+    goes through this service to ensure no nested parallelism occurs.
+    """
+
+    def __init__(self, runtime_config: Optional[RuntimeConfig] = None):
         self.logger = logger
+        self.config = runtime_config or get_runtime_config()
+        self.logger.info(f"BatchProcessingService initialized with {self.config.get_summary()}")
 
-    def process_batch(self, image_files: List[Path],
-                     image_processor: ImageProcessingInterface,
-                     receipt_parser: ReceiptParsingInterface) -> Tuple[int, int, TokenUsage]:
-        """Process multiple images and return success/failure counts and token usage"""
-        successful_processes = 0
-        failed_processes = 0
+    def process_batch(
+        self,
+        image_files: List[Path],
+        image_processor: Optional[ImageProcessingInterface] = None,
+        receipt_parser: Optional[ReceiptParsingInterface] = None,
+    ) -> Tuple[int, int, TokenUsage]:
+        """Process multiple images with controlled concurrency
+
+        Args:
+            image_files: List of image file paths to process
+            image_processor: Optional custom image processor (for testing with fakes)
+            receipt_parser: Optional custom receipt parser (for testing with fakes)
+
+        Returns:
+            Tuple of (successful_count, failed_count, total_token_usage)
+        """
+        if not image_files:
+            self.logger.warning("No images to process")
+            return 0, 0, TokenUsage()
+
+        total_images = len(image_files)
+        self.logger.info(f"Processing {total_images} images with mode={self.config.mode.value}, "
+                        f"max_workers={self.config.max_workers}")
+
+        batch_start_time = time.time()
+
+        # Track results
+        results: List[ProcessingResult] = []
+        ocr_breakdown: Dict[str, int] = {}
+
+        # Use provided processors for tests, otherwise use worker-based processing
+        if image_processor is not None and receipt_parser is not None:
+            # Test mode: use provided fakes directly (sequential only)
+            results = self._process_with_provided_services(
+                image_files, image_processor, receipt_parser, ocr_breakdown
+            )
+        elif self.config.max_workers > 1:
+            # Parallel processing with ProcessPoolExecutor
+            results = self._process_parallel(image_files, ocr_breakdown)
+        else:
+            # Sequential processing with fresh instances
+            results = self._process_sequential(image_files, ocr_breakdown)
+
+        # Aggregate results
+        successful_processes = sum(1 for r in results if r.success)
+        failed_processes = total_images - successful_processes
+
         total_token_usage = TokenUsage()
-
-        for i, image_path in enumerate(image_files, 1):
-            # Process image using interfaces with validation-driven retry
-            ocr_text = image_processor.extract_text(str(image_path))
-            result = receipt_parser.parse_with_validation_driven_retry(ocr_text, str(image_path))
-
-            # Collect structured result for formatted output
-            # result is now ParsingResult with .parsed, .valid, .error, .token_usage
-            # parsed can be a Receipt object or a dict (when validation failed but data preserved)
-            if result.parsed is None:
-                parsed_data = {}
-            elif hasattr(result.parsed, '__dict__'):
-                # It's a Receipt object
-                parsed_data = result.parsed.__dict__
-            elif isinstance(result.parsed, dict):
-                # It's a dict (preserved after validation failure)
-                parsed_data = result.parsed
-            else:
-                parsed_data = {}
-
-            # Extract token usage from result (accumulated across all attempts)
-            token_data = {
-                'input_tokens': result.token_usage.input_tokens if result.token_usage else 0,
-                'output_tokens': result.token_usage.output_tokens if result.token_usage else 0,
-                'total_tokens': result.token_usage.get_total_tokens() if result.token_usage else 0
-            }
-
-            # Determine actual success status:
-            # SUCCESS only if validation passed (valid=True) AND receipt has meaningful content
-            has_meaningful_data = (
-                result.valid and
-                parsed_data and
-                parsed_data.get('items') and
-                len(parsed_data.get('items', [])) > 0 and
-                parsed_data.get('total') is not None
+        for r in results:
+            total_token_usage.add_usage(
+                r.token_usage.input_tokens,
+                r.token_usage.output_tokens
             )
 
-            formatted_result = {
-                'image_path': str(image_path),
-                'success': has_meaningful_data,
-                'parsed_receipt': parsed_data,  # Preserved even on validation failure
-                'retries': receipt_parser.get_current_retries() if hasattr(receipt_parser, 'get_current_retries') else [],
-                'validation_error': result.error if result.error else None,
-                'token_usage': token_data
-            }
+        batch_time = (time.time() - batch_start_time) * 1000
+        avg_time = batch_time / total_images if total_images > 0 else 0
 
-            # Print formatted output instead of raw logging
-            print(format_receipt_result(formatted_result))
+        # Create observability summary
+        observability = BatchObservability(
+            total_images=total_images,
+            successful=successful_processes,
+            failed=failed_processes,
+            total_time_ms=batch_time,
+            avg_time_per_image_ms=avg_time,
+            total_tokens=total_token_usage,
+            ocr_breakdown=ocr_breakdown,
+        )
 
-            # Track token usage from result (accumulated across initial + all retries)
-            if result.token_usage:
-                total_token_usage.add_usage(
-                    result.token_usage.input_tokens,
-                    result.token_usage.output_tokens
-                )
-
-            # Update counters - success only if validation passed
-            if result.valid and parsed_data:
-                successful_processes += 1
-            else:
-                failed_processes += 1
+        # Log detailed summary
+        self._log_batch_summary(results, observability)
 
         return successful_processes, failed_processes, total_token_usage
+
+    def _process_parallel(
+        self,
+        image_files: List[Path],
+        ocr_breakdown: Dict[str, int],
+    ) -> List[ProcessingResult]:
+        """Process images in parallel using ProcessPoolExecutor"""
+        results = []
+
+        with ProcessPoolExecutor(max_workers=self.config.max_workers) as executor:
+            # Submit all tasks
+            future_to_path = {
+                executor.submit(
+                    _process_single_image_worker,
+                    str(image_path),
+                    self.config.mode.value,
+                    self.config.max_workers,
+                    self.config.ocr_threads,
+                ): image_path
+                for image_path in image_files
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_path):
+                image_path = future_to_path[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+
+                    # Print formatted output
+                    self._print_result(result)
+
+                    # Track OCR method usage
+                    ocr_breakdown[result.ocr_method] = ocr_breakdown.get(result.ocr_method, 0) + 1
+
+                except Exception as e:
+                    self.logger.error(f"Failed to process {image_path}: {e}")
+                    error_result = ProcessingResult(
+                        image_path=str(image_path),
+                        success=False,
+                        parsed_data={},
+                        retries=[],
+                        validation_error=str(e),
+                        token_usage=TokenUsage(),
+                        processing_time_ms=0.0,
+                        ocr_method="error",
+                        ocr_duration_ms=0.0,
+                    )
+                    results.append(error_result)
+                    ocr_breakdown["error"] = ocr_breakdown.get("error", 0) + 1
+
+        return results
+
+    def _process_sequential(
+        self,
+        image_files: List[Path],
+        ocr_breakdown: Dict[str, int],
+    ) -> List[ProcessingResult]:
+        """Process images sequentially (single-threaded)"""
+        results = []
+
+        for image_path in image_files:
+            result = _process_single_image_worker(
+                str(image_path),
+                self.config.mode.value,
+                self.config.max_workers,
+                self.config.ocr_threads,
+            )
+            results.append(result)
+
+            # Print formatted output
+            self._print_result(result)
+
+            # Track OCR method usage
+            ocr_breakdown[result.ocr_method] = ocr_breakdown.get(result.ocr_method, 0) + 1
+
+        return results
+
+    def _print_result(self, result: ProcessingResult) -> None:
+        """Print formatted result for a single image"""
+        token_data = {
+            'input_tokens': result.token_usage.input_tokens,
+            'output_tokens': result.token_usage.output_tokens,
+            'total_tokens': result.token_usage.get_total_tokens(),
+        }
+
+        formatted = {
+            'image_path': result.image_path,
+            'success': result.success,
+            'parsed_receipt': result.parsed_data,
+            'retries': result.retries,
+            'validation_error': result.validation_error,
+            'token_usage': token_data,
+            'processing_time_ms': round(result.processing_time_ms, 1),
+            'ocr_method': result.ocr_method,
+            'ocr_duration_ms': round(result.ocr_duration_ms, 1),
+        }
+
+        print(format_receipt_result(formatted))
+
+    def _process_with_provided_services(
+        self,
+        image_files: List[Path],
+        image_processor: ImageProcessingInterface,
+        receipt_parser: ReceiptParsingInterface,
+        ocr_breakdown: Dict[str, int],
+    ) -> List[ProcessingResult]:
+        """Process images using provided service instances (for testing with fakes)
+
+        This method bypasses the worker process creation and uses the provided
+        fake implementations directly, allowing tests to run without filesystem access.
+        """
+        results = []
+
+        for image_path in image_files:
+            start_time = time.time()
+
+            try:
+                # Extract text using provided image processor (fake)
+                ocr_start = time.time()
+                ocr_text = image_processor.extract_text(str(image_path))
+                ocr_duration = (time.time() - ocr_start) * 1000
+
+                # Parse receipt using provided parser (fake)
+                result = receipt_parser.parse_with_validation_driven_retry(ocr_text, str(image_path))
+
+                # Determine success
+                if result.parsed is None:
+                    parsed_data = {}
+                elif hasattr(result.parsed, '__dict__'):
+                    parsed_data = result.parsed.__dict__
+                elif isinstance(result.parsed, dict):
+                    parsed_data = result.parsed
+                else:
+                    parsed_data = {}
+
+                has_meaningful_data = (
+                    result.valid and
+                    parsed_data and
+                    parsed_data.get('items') and
+                    len(parsed_data.get('items', [])) > 0 and
+                    parsed_data.get('total') is not None
+                )
+
+                processing_time = (time.time() - start_time) * 1000
+
+                processing_result = ProcessingResult(
+                    image_path=str(image_path),
+                    success=has_meaningful_data,
+                    parsed_data=parsed_data,
+                    retries=receipt_parser.get_current_retries() if hasattr(receipt_parser, 'get_current_retries') else [],
+                    validation_error=result.error if result.error else None,
+                    token_usage=result.token_usage if result.token_usage else TokenUsage(),
+                    processing_time_ms=processing_time,
+                    ocr_method='fake',
+                    ocr_duration_ms=ocr_duration,
+                )
+
+                results.append(processing_result)
+                ocr_breakdown['fake'] = ocr_breakdown.get('fake', 0) + 1
+
+                # Print formatted output
+                self._print_result(processing_result)
+
+            except Exception as e:
+                self.logger.error(f"Failed to process {image_path}: {e}")
+                error_result = ProcessingResult(
+                    image_path=str(image_path),
+                    success=False,
+                    parsed_data={},
+                    retries=[],
+                    validation_error=str(e),
+                    token_usage=TokenUsage(),
+                    processing_time_ms=0.0,
+                    ocr_method="error",
+                    ocr_duration_ms=0.0,
+                )
+                results.append(error_result)
+                ocr_breakdown["error"] = ocr_breakdown.get("error", 0) + 1
+
+        return results
+
+    def _log_batch_summary(
+        self,
+        results: List[ProcessingResult],
+        obs: BatchObservability,
+    ) -> None:
+        """Log detailed batch summary"""
+        logger.info("=" * 60)
+        logger.info("BATCH PROCESSING COMPLETE")
+        logger.info(f"Total: {obs.total_images} | Successful: {obs.successful} | Failed: {obs.failed}")
+        logger.info(f"Success Rate: {(obs.successful/obs.total_images*100):.1f}%")
+        logger.info(f"Total Time: {obs.total_time_ms:.1f}ms | Avg per image: {obs.avg_time_per_image_ms:.1f}ms")
+        logger.info(f"Tokens: {obs.total_tokens.get_total_tokens():,} total")
+        logger.info(f"OCR Methods: {obs.ocr_breakdown}")
+        logger.info("=" * 60)
 
     def validate_image_files(self, imgs_dir: Path) -> List[Path]:
         """Validate and get list of image files to process"""

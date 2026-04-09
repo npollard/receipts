@@ -1,8 +1,31 @@
 """Main entry point for receipt processing application"""
 
+import os
+import sys
+
+# =============================================================================
+# CRITICAL: Enforce thread limits BEFORE any imports that might load
+# torch, numpy, or easyocr. This prevents hidden parallelism.
+# =============================================================================
+# Add src to path for config import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
+# Import and enforce thread limits immediately
+from config.runtime_config import create_config_from_env, enforce_thread_limits
+
+# Create runtime config and enforce thread limits
+_runtime_config = create_config_from_env()
+enforce_thread_limits(_runtime_config)
+
+# Log config early
+print(_runtime_config.get_summary(), file=sys.stderr)
+print(f"\nThread limits enforced before any heavy imports.", file=sys.stderr)
+print("THREADS:", torch.get_num_threads(), os.environ.get("OMP_NUM_THREADS")) 
+# =============================================================================
+
 import argparse
 import logging
-import os
+from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any
 
@@ -18,7 +41,7 @@ from image_processing import VisionProcessor
 from domain.parsing.receipt_parser import ReceiptParser
 from services.batch_service import BatchProcessingService
 from database_models import DatabaseManager
-from config import DATABASE_URL, IS_TEST, app_config
+from config import DATABASE_URL, IS_TEST, app_config, get_runtime_config
 
 # Load environment variables
 load_dotenv()
@@ -27,6 +50,9 @@ load_dotenv()
 from core.logging import setup_logging
 setup_logging(level="INFO")
 logger = logging.getLogger(__name__)
+
+# Log the runtime configuration
+logger.info(_runtime_config.get_summary())
 
 
 def main():
@@ -78,13 +104,10 @@ def main():
     if not image_files:
         return
 
-    # Process batch using the new interface-based approach
-    batch_service = BatchProcessingService()
-    successful, failed, token_usage = batch_service.process_batch(
-        image_files,
-        image_processor,
-        receipt_parser
-    )
+    # Process batch using controlled concurrency
+    # BatchProcessingService is the SINGLE layer controlling parallelism
+    batch_service = BatchProcessingService(runtime_config=_runtime_config)
+    successful, failed, token_usage = batch_service.process_batch(image_files)
 
     # Print batch summary
     print_batch_summary(successful, failed, len(image_files))

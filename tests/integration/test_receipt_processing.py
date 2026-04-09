@@ -72,6 +72,7 @@ def test_receipt_processor_process_directly_returns_expected_receipt_and_token_u
         "output_tokens": 45,
         "total_tokens": 165,
         "estimated_cost": 0.045,
+        "model_name": "gpt-4o-mini",
     }
 
 
@@ -110,11 +111,24 @@ def test_process_batch_images_aggregates_stubbed_token_usage(monkeypatch, tmp_pa
     def fake_extract_text(self, path: str) -> str:
         return expected_ocr_by_path[path]
 
-    def fake_parse_text(self, text: str) -> APIResponse:
-        return APIResponse.success(receipt_by_ocr[text].copy())
+    def fake_parse_with_retry(self, ocr_text: str, image_path: str = None):
+        from domain.parsing.receipt_parser import ParsingResult
+        receipt_data = receipt_by_ocr[ocr_text]
+        result = ParsingResult()
+        result.parsed = {k: v for k, v in receipt_data.items() if k != "_token_usage"}
+        result.valid = True
+        result.error = None
+        result.token_usage.add_usage(
+            receipt_data["_token_usage"]["input_tokens"],
+            receipt_data["_token_usage"]["output_tokens"],
+        )
+        return result
 
     monkeypatch.setattr("image_processing.VisionProcessor.extract_text", fake_extract_text)
-    monkeypatch.setattr("domain.parsing.receipt_parser.ReceiptParser.parse_text", fake_parse_text)
+    monkeypatch.setattr(
+        "domain.parsing.receipt_parser.ReceiptParser.parse_with_validation_driven_retry",
+        fake_parse_with_retry,
+    )
 
     # Use BatchProcessingService directly instead of main.process_batch_images
     image_processor = VisionProcessor()
@@ -130,6 +144,7 @@ def test_process_batch_images_aggregates_stubbed_token_usage(monkeypatch, tmp_pa
         "output_tokens": 35,
         "total_tokens": 185,
         "estimated_cost": 0.0435,
+        "model_name": "gpt-4o-mini",
     }
 
 
@@ -158,13 +173,30 @@ def test_process_batch_images_tracks_only_successful_token_usage_when_one_parse_
     def fake_extract_text(self, path: str) -> str:
         return expected_ocr_by_path[path]
 
-    def fake_parse_text(self, text: str) -> APIResponse:
-        if text == successful_ocr:
-            return APIResponse.success(successful_receipt.copy())
-        return APIResponse.failure("Validation failed: missing total")
+    def fake_parse_with_retry(self, ocr_text: str, image_path: str = None):
+        from domain.parsing.receipt_parser import ParsingResult
+        if ocr_text == successful_ocr:
+            result = ParsingResult()
+            result.parsed = {k: v for k, v in successful_receipt.items() if k != "_token_usage"}
+            result.valid = True
+            result.error = None
+            result.token_usage.add_usage(
+                successful_receipt["_token_usage"]["input_tokens"],
+                successful_receipt["_token_usage"]["output_tokens"],
+            )
+            return result
+        # Return failure result
+        result = ParsingResult()
+        result.parsed = None
+        result.valid = False
+        result.error = "Validation failed: missing total"
+        return result
 
     monkeypatch.setattr("image_processing.VisionProcessor.extract_text", fake_extract_text)
-    monkeypatch.setattr("domain.parsing.receipt_parser.ReceiptParser.parse_text", fake_parse_text)
+    monkeypatch.setattr(
+        "domain.parsing.receipt_parser.ReceiptParser.parse_with_validation_driven_retry",
+        fake_parse_with_retry,
+    )
 
     # Use BatchProcessingService directly instead of main.process_batch_images
     image_processor = VisionProcessor()
@@ -180,4 +212,5 @@ def test_process_batch_images_tracks_only_successful_token_usage_when_one_parse_
         "output_tokens": 10,
         "total_tokens": 60,
         "estimated_cost": 0.0135,
+        "model_name": "gpt-4o-mini",
     }

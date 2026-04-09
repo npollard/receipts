@@ -1,6 +1,6 @@
 # Receipts
 
-AI-powered receipt processing system exploring **production-grade LLM workflows**—reliability, validation, error-driven retries, and cost observability.
+AI-powered receipt processing system exploring **production-grade LLM workflows**—reliability, validation, error-driven retries, cost observability, and **controlled concurrency**.
 
 ## Why This Project Exists
 
@@ -9,7 +9,70 @@ LLMs are powerful but unreliable in production. This codebase demonstrates patte
 - **Deterministic + AI hybrid pipeline**: Local OCR (EasyOCR) first, LLM parsing second
 - **Error-driven retry orchestration**: Three strategies triggered by validation failures
 - **Graceful degradation**: Preserve partial results even when validation fails
-- **Full observability**: Token usage tracking, cost estimation, structured logging
+- **Full observability**: Token usage tracking, cost estimation, structured logging, per-image timing
+- **Controlled concurrency**: Single-layer parallelism with explicit thread limits (no hidden CPU saturation)
+
+## Concurrency Control
+
+This application implements **strict, centralized concurrency control** to prevent CPU saturation and ensure predictable performance on resource-constrained environments like laptops.
+
+### Single-Layer Parallelism Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Application Entrypoint (main.py)                            │
+│  ├── Enforces thread limits BEFORE any imports               │
+│  ├── OMP_NUM_THREADS, MKL_NUM_THREADS, OPENBLAS_NUM_THREADS │
+│  └── torch.set_num_threads()                                 │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  BatchProcessingService (SINGLE parallelism layer)           │
+│  ├── ProcessPoolExecutor(max_workers=MAX_WORKERS)            │
+│  ├── Each worker: fresh OCR + Parser instances              │
+│  └── No shared stateful objects across processes            │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Worker Process                                             │
+│  ├── OCRService (OCR_THREADS=1 when parallel)              │
+│  ├── ReceiptParser                                          │
+│  └── Sequential processing within worker                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Execution Modes
+
+| Mode | MAX_WORKERS | OCR_THREADS | Use Case |
+|------|-------------|-------------|----------|
+| **dev** (default) | 1 | 1 | Safe development, debugging, testing |
+| **local** | 2 | 1 | Local batch processing on laptops |
+| **cloud** | 4 | 1 | Cloud deployment with more resources |
+
+### Environment Variables
+
+```bash
+# Execution mode (dev/local/cloud)
+export EXECUTION_MODE=local
+
+# Override defaults (optional)
+export MAX_WORKERS=2        # Number of parallel workers
+export OCR_THREADS=1        # Must be 1 when MAX_WORKERS > 1
+```
+
+### Runtime Guard
+
+The application enforces **no nested parallelism**:
+- If `MAX_WORKERS > 1` AND `OCR_THREADS > 1` → RuntimeError
+- This ensures exactly ONE layer controls parallelism
+
+### Performance Characteristics
+
+- **Default mode (dev)**: ~100% CPU (single core), deterministic, safe for laptops
+- **Local mode**: ~150-200% CPU (2 workers), good throughput without saturation
+- **Cloud mode**: Scales based on available cores, ~400% CPU with 4 workers
 
 ## Architecture Overview
 
@@ -43,6 +106,8 @@ LLMs are powerful but unreliable in production. This codebase demonstrates patte
 - **Retry strategies adapt to error severity**: Small errors → self-correction; Large errors → RAG or OCR reprocessing
 - **Always preserve parsed data**: Even failed validations return partial results for debugging
 - **Deterministic OCR scoring**: Structured scoring with clear thresholds (bad ≤0.4, medium ≥0.3, good ≥0.5)
+- **Single-layer parallelism**: BatchProcessingService is the ONLY layer controlling concurrency
+- **Thread limits enforced at entrypoint**: OMP, MKL, OpenBLAS, and torch threads are configured before any heavy imports
 
 ## Prerequisites
 
@@ -69,9 +134,17 @@ mkdir -p imgs # Place receipt images here
 
 ## Usage
 
+### Basic Usage
+
 ```bash
-# Process all images in imgs/
+# Process all images in imgs/ (default: dev mode, single-threaded)
 python main.py
+
+# Run in local mode with limited parallelism (2 workers)
+EXECUTION_MODE=local python main.py
+
+# Run in cloud mode with more workers
+EXECUTION_MODE=cloud python main.py
 
 # Show accumulated token usage and costs -- do not process images
 python main.py --usage-summary-only
@@ -81,6 +154,50 @@ python main.py --no-db
 ```
 
 Place receipt images (`.jpg`, `.jpeg`, `.png`) in `imgs/` and run.
+
+### Execution Mode Examples
+
+```bash
+# Development mode (default): Safe, single-threaded, deterministic
+python main.py
+
+# Local batch mode: 2 workers, good for laptop batch processing
+EXECUTION_MODE=local python main.py
+
+# Cloud mode: 4 workers, for deployment with more resources
+EXECUTION_MODE=cloud python main.py
+
+# Custom parallelism (dev mode with explicit overrides)
+EXECUTION_MODE=dev MAX_WORKERS=2 OCR_THREADS=1 python main.py
+```
+
+### Output with Observability
+
+The system now logs per-image processing details:
+
+```
+==============================
+RECEIPT: receipt_001.jpg
+==============================
+
+STATUS: ✅ SUCCESS
+RETRIES: LLM_SELF_CORRECTION
+
+TOTAL: $47.83
+
+ITEMS (3):
+- Milk .... $3.49
+- Eggs .... $5.99
+- Bread .... $2.50
+
+TOKENS:
+- Input: 1247
+- Output: 423
+- Total: 1670
+
+OCR: easyocr (245ms)
+Processing: 1450ms
+```
 
 ## Pipeline Details
 
@@ -95,6 +212,18 @@ Place receipt images (`.jpg`, `.jpeg`, `.png`) in `imgs/` and run.
 - Triggered when EasyOCR quality < 0.25
 - Also used in retry strategy #3
 - Higher cost but better on poor-quality images
+
+#### OCR Comparison
+
+| Aspect | EasyOCR | OpenAI Vision |
+|--------|---------|---------------|
+| **Cost** | Free (local) | ~$0.001-0.005 per image |
+| **Speed** | ~200-500ms | ~1000-3000ms |
+| **Quality** | Good on clear images | Better on poor-quality images |
+| **Fallback** | Primary method | Triggered when quality < 0.25 |
+| **Thread Safety** | Respects thread limits | N/A (API call) |
+
+The system automatically selects the best OCR method based on quality scoring, with per-image observability logged for analysis.
 
 ### 2. LLM Parsing: GPT-4o-mini
 
@@ -211,11 +340,19 @@ python -m pytest tests/test_models.py -v
 
 ## TODO
 
+### Completed
+- [x] **Controlled concurrency**: Centralized RuntimeConfig with single-layer parallelism
+- [x] **Thread limits**: Enforced at entrypoint before any heavy imports
+- [x] **Execution modes**: dev/local/cloud with different parallelism profiles
+- [x] **OCR observability**: Per-image timing, OCR method tracking, quality scoring
+- [x] **Runtime guard**: No nested parallelism enforcement
+
+### In Progress / Planned
 - [ ] Experiment with PaddleOCR for cost/quality comparison
 - [ ] Mobile app for receipt upload
 - [ ] REST API for external integrations
 - [ ] Multi-user identity management (auth)
-- [ ] Horizontal scaling architecture
+- [ ] Horizontal scaling architecture (cloud mode foundation laid)
 
 ## Project Structure
 
@@ -226,6 +363,9 @@ receipts/
 ├── main.py                    # CLI entry point
 ├── pyproject.toml             # Project configuration (pytest, dependencies)
 ├── src/                       # Application source code
+│   ├── config/
+│   │   ├── settings.py        # AppConfig, DatabaseConfig
+│   │   └── runtime_config.py  # RuntimeConfig, ExecutionMode, thread limits
 │   ├── pipeline/
 │   │   └── processor.py       # ReceiptProcessor orchestration with DI
 │   ├── domain/
@@ -234,12 +374,13 @@ receipts/
 │   │   └── validation/
 │   │       └── validation_service.py  # Pydantic validation
 │   ├── services/
-│   │   ├── ocr_service.py     # EasyOCR + Vision fallback (lazy init)
-│   │   ├── batch_service.py   # Multi-image processing
+│   │   ├── ocr_service.py     # EasyOCR + Vision fallback (lazy init, thread-safe)
+│   │   ├── batch_service.py   # Multi-image processing with ProcessPoolExecutor
 │   │   └── token_service.py   # Usage aggregation
 │   ├── contracts/
 │   │   └── interfaces.py      # ImageProcessingInterface, ReceiptParsingInterface
 │   └── image_processing.py    # VisionProcessor with DI support
+│
 ├── tests/
 │   ├── fakes/                 # Test doubles for DI
 │   │   ├── fake_vision_processor.py
@@ -290,5 +431,5 @@ All project configuration is centralized in `pyproject.toml`:
 TODO:
 - [ ] Frontend app for image ingestion
 - [ ] REST API for external integrations
-- [ ] Horizontal scaling
-- [ ] Experiment with OCR models - static rules, trained model, Vision API
+- [ ] Horizontal scaling (cloud mode ready)
+- [ ] Experiment with OCR models - PaddleOCR comparison

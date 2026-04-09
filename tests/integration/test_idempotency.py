@@ -70,8 +70,11 @@ def test_receipt_data_hashing():
 def test_database_idempotency():
     """Test database-level idempotency with receipt data"""
 
-    # Database configuration (use in-memory SQLite for testing)
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///test_receipts.db")
+    # Database configuration (use unique temp file per test to avoid locking issues)
+    import tempfile
+    temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    temp_db.close()
+    DATABASE_URL = f"sqlite:///{temp_db.name}"
 
     # Initialize database manager
     db_manager = DatabaseManager(DATABASE_URL)

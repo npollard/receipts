@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 
-import sys
-import os
-
-# Add the project root to the path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from domain.parsing.receipt_parser import ReceiptParser
 from api_response import APIResponse
 from tracking import TokenUsage
@@ -23,7 +17,7 @@ def test_unified_parser():
         print(f"Temperature: {parser.llm.temperature}")
     except Exception as e:
         print(f"Initialization failed: {e}")
-        return False
+        assert False, f"Initialization failed: {e}"
 
     # Test 2: Method availability
     print("\n=== TEST 2: METHOD AVAILABILITY ===")
@@ -42,7 +36,7 @@ def test_unified_parser():
             print(f"Method '{method}': Available")
         else:
             print(f"Method '{method}: MISSING")
-            return False
+            assert False, f"Method '{method}' is missing"
 
     # Test 3: Token usage tracking
     print("\n=== TEST 3: TOKEN USAGE TRACKING ===")
@@ -53,7 +47,7 @@ def test_unified_parser():
         print("Token usage tracking works")
     except Exception as e:
         print(f"Token usage tracking failed: {e}")
-        return False
+        assert False, f"Token usage tracking failed: {e}"
 
     # Test 4: LangChain tool interface
     print("\n=== TEST 4: LANGCHAIN TOOL INTERFACE ===")
@@ -66,10 +60,10 @@ def test_unified_parser():
             print(f"Tool description: {tool_method.description[:100]}...")
         else:
             print("LangChain tool decorator: Missing")
-            return False
+            assert False, "LangChain tool decorator is missing"
     except Exception as e:
         print(f"LangChain tool test failed: {e}")
-        return False
+        assert False, f"LangChain tool test failed: {e}"
 
     # Test 5: Prompt building
     print("\n=== TEST 5: PROMPT BUILDING ===")
@@ -81,7 +75,7 @@ def test_unified_parser():
         print("Prompt building works")
     except Exception as e:
         print(f"Prompt building failed: {e}")
-        return False
+        assert False, f"Prompt building failed: {e}"
 
     # Test 6: System prompt
     print("\n=== TEST 6: SYSTEM PROMPT ===")
@@ -93,14 +87,14 @@ def test_unified_parser():
         print("System prompt configured correctly")
     except Exception as e:
         print(f"System prompt test failed: {e}")
-        return False
+        assert False, f"System prompt test failed: {e}"
 
     # Test 7: Dependencies
+    # Note: persistence intentionally removed from domain layer (clean architecture)
     print("\n=== TEST 7: DEPENDENCIES ===")
     dependencies = [
         ('validation_service', 'ValidationService'),
         ('token_usage', 'TokenUsage'),
-        ('persistence', 'TokenUsagePersistence'),
         ('retry_service', 'RetryService'),
         ('llm', 'ChatOpenAI')
     ]
@@ -112,7 +106,7 @@ def test_unified_parser():
             print(f"{attr_name}: {actual_type} (expected: {expected_type})")
         else:
             print(f"{attr_name}: MISSING")
-            return False
+            assert False, f"{attr_name} is missing"
 
     # Test 8: Error handling (without making actual API calls)
     print("\n=== TEST 8: ERROR HANDLING ===")
@@ -120,11 +114,11 @@ def test_unified_parser():
         # Test with empty text - should handle gracefully
         result = parser.parse_text("")
         print(f"Empty text result type: {type(result).__name__}")
-        print(f"Empty text result status: {result.status if hasattr(result, 'status') else 'N/A'}")
+        print(f"Empty text result valid: {result.valid if hasattr(result, 'valid') else 'N/A'}")
         print("Error handling works")
     except Exception as e:
         print(f"Error handling test failed: {e}")
-        return False
+        assert False, f"Error handling test failed: {e}"
 
     print("\n=== ALL TESTS PASSED ===")
     print("Unified ReceiptParser is working correctly!")

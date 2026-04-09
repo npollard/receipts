@@ -1,14 +1,33 @@
-"""OCR service for extracting text from images using local EasyOCR"""
+"""OCR service for extracting text from images using local EasyOCR
+
+This service enforces thread limits to prevent hidden parallelism.
+All OCR operations respect the centralized RuntimeConfig.
+"""
 
 import re
 import os
+import sys
+import time
 import warnings
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Tuple
+from dataclasses import dataclass
 from langchain_core.runnables import RunnableLambda
+
+# Thread limits must be set BEFORE importing torch/easyocr
+# The main entrypoint should have already enforced these
+if "OMP_NUM_THREADS" not in os.environ:
+    os.environ["OMP_NUM_THREADS"] = "1"
+if "MKL_NUM_THREADS" not in os.environ:
+    os.environ["MKL_NUM_THREADS"] = "1"
+if "OPENBLAS_NUM_THREADS" not in os.environ:
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 # Detect MPS device and suppress torch warnings before importing EasyOCR
 try:
     import torch
+    # Enforce thread limits on torch
+    torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "1")))
+    torch.set_num_interop_threads(1)
     is_mps = torch.backends.mps.is_available()
     if is_mps:
         # Suppress pin_memory warning on MPS devices
@@ -34,12 +53,38 @@ from contracts.interfaces import ImageProcessingInterface
 logger = get_ocr_logger(__name__)
 
 
+@dataclass
+class OCRObservability:
+    """Observability data for OCR operations"""
+    method: str  # 'easyocr', 'vision', 'fallback'
+    start_time: float
+    end_time: float
+    quality_score: float
+    text_length: int
+    confidence_threshold: float
+
+    @property
+    def duration_ms(self) -> float:
+        return (self.end_time - self.start_time) * 1000
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'method': self.method,
+            'duration_ms': round(self.duration_ms, 2),
+            'quality_score': round(self.quality_score, 3),
+            'text_length': self.text_length,
+            'confidence_threshold': self.confidence_threshold,
+        }
+
+
 class OCRService(ImageProcessingInterface):
     """Service for OCR text extraction using local EasyOCR"""
 
-    def __init__(self, config: OCRConfig = None, use_gpu: bool = None, lang: List[str] = None, confidence_threshold: float = None, debug: bool = None, comparison_mode: bool = None, quality_threshold: float = None, debug_ocr: bool = None):
+    def __init__(self, config: OCRConfig = None, use_gpu: bool = None, lang: List[str] = None,
+                 confidence_threshold: float = None, debug: bool = None, comparison_mode: bool = None,
+                 quality_threshold: float = None, debug_ocr: bool = None):
         """
-        Initialize EasyOCR service with configurable settings
+        Initialize EasyOCR service with configurable settings and thread control
 
         Args:
             config: OCRConfig instance (takes precedence over individual parameters)
@@ -83,8 +128,19 @@ class OCRService(ImageProcessingInterface):
         self.quality_threshold = config.quality_threshold
         self.debug_ocr = config.debug_ocr
 
-        # Initialize EasyOCR with specified languages
-        self.ocr = easyocr.Reader(config.languages, gpu=config.use_gpu)
+        # Log thread limits being used
+        torch_threads = torch.get_num_threads() if 'torch' in sys.modules else 'N/A'
+        logger.info(f"Initializing OCRService with thread limits: torch={torch_threads}, "
+                   f"OMP={os.environ.get('OMP_NUM_THREADS', 'N/A')}")
+
+        # Detect test environment and disable EasyOCR to prevent model downloads
+        self._is_test_mode = "PYTEST_CURRENT_TEST" in os.environ
+        if self._is_test_mode:
+            logger.info("Test environment detected - EasyOCR disabled")
+            self._ocr_reader = None
+        else:
+            # Initialize EasyOCR reader lazily for production
+            self._ocr_reader = None
 
         # Initialize OpenAI Vision client for fallback and comparison mode
         self.vision_llm = ChatOpenAI(
@@ -96,27 +152,90 @@ class OCRService(ImageProcessingInterface):
         self._preprocess_chain = RunnableLambda(self._preprocess_image)
         self._ocr_chain = RunnableLambda(self._extract_easyocr_text)
 
-        logger.info(f"Initialized OCRService with EasyOCR (GPU: {config.use_gpu}, Lang: {config.languages}, Confidence: {config.confidence_threshold}, Debug: {config.debug}, Comparison: {config.comparison_mode}, Quality Threshold: {config.quality_threshold}, Debug OCR: {config.debug_ocr})")
+        logger.info(f"Initialized OCRService with EasyOCR (GPU: {config.use_gpu}, Lang: {config.languages}, "
+                   f"Confidence: {config.confidence_threshold}, Quality Threshold: {config.quality_threshold})")
+
+    def _get_reader(self):
+        """Lazy initialization of EasyOCR reader
+
+        This prevents EasyOCR from downloading models or initializing
+        during tests when OCRService is instantiated but not used.
+        """
+        if self._is_test_mode:
+            raise RuntimeError("EasyOCR is disabled in test environment. Use mocks or fake implementations.")
+        if self._ocr_reader is None:
+            self._ocr_reader = easyocr.Reader(self.config.languages, gpu=self.config.use_gpu)
+        return self._ocr_reader
 
     def preprocess_image(self, image_path: str) -> Any:
         """Preprocess image for OCR"""
         return self._preprocess_image(image_path)
 
-    def extract_text(self, image_path: str, use_vision_fallback: bool = False) -> str:
-        """Extract text from image using EasyOCR with quality-based fallback to Vision OCR
+    def extract_text_with_observability(self, image_path: str, use_vision_fallback: bool = False) -> Tuple[str, OCRObservability]:
+        """Extract text with full observability data - internal use
 
         Args:
             image_path: Path to the image file
             use_vision_fallback: If True, use Vision OCR directly instead of EasyOCR
+
+        Returns:
+            Tuple of (extracted_text, observability_data)
         """
+        start_time = time.time()
+
         if use_vision_fallback:
             logger.info("Using Vision OCR fallback")
-            return self._extract_vision_text(image_path)
+            text = self._extract_vision_text(image_path)
+            end_time = time.time()
+            obs = OCRObservability(
+                method='vision',
+                start_time=start_time,
+                end_time=end_time,
+                quality_score=0.0,  # Not scored for direct vision
+                text_length=len(text),
+                confidence_threshold=self.confidence_threshold,
+            )
+            return text, obs
 
         if self.comparison_mode:
-            return self._extract_with_comparison(image_path)
+            text = self._extract_with_comparison(image_path)
         else:
-            return self._extract_with_quality_fallback(image_path)
+            text, method, quality = self._extract_with_quality_fallback_observable(image_path)
+            end_time = time.time()
+            obs = OCRObservability(
+                method=method,
+                start_time=start_time,
+                end_time=end_time,
+                quality_score=quality,
+                text_length=len(text),
+                confidence_threshold=self.confidence_threshold,
+            )
+            return text, obs
+
+        # Comparison mode doesn't return observability
+        end_time = time.time()
+        obs = OCRObservability(
+            method='comparison',
+            start_time=start_time,
+            end_time=end_time,
+            quality_score=0.0,
+            text_length=len(text),
+            confidence_threshold=self.confidence_threshold,
+        )
+        return text, obs
+
+    def extract_text(self, image_path: str, use_vision_fallback: bool = False) -> str:
+        """Extract text from image - implements ImageProcessingInterface
+
+        Args:
+            image_path: Path to the image file
+            use_vision_fallback: If True, use Vision OCR directly instead of EasyOCR
+
+        Returns:
+            Extracted text string only (for interface compatibility)
+        """
+        text, _ = self.extract_text_with_observability(image_path, use_vision_fallback)
+        return text
 
     def _log_debug_header(self, image_path: str):
         """Log debug header for OCR processing"""
@@ -185,6 +304,11 @@ class OCRService(ImageProcessingInterface):
 
     def _extract_with_quality_fallback(self, image_path: str) -> str:
         """Extract text using EasyOCR with automatic fallback to Vision OCR based on quality score"""
+        text, _, _ = self._extract_with_quality_fallback_observable(image_path)
+        return text
+
+    def _extract_with_quality_fallback_observable(self, image_path: str) -> Tuple[str, str, float]:
+        """Extract text with observability - returns (text, method_used, quality_score)"""
         try:
             if self.debug_ocr:
                 self._log_debug_header(image_path)
@@ -209,13 +333,16 @@ class OCRService(ImageProcessingInterface):
             if should_fallback:
                 return self._handle_fallback_to_vision(image_path, easyocr_text, quality_score)
             else:
-                return self._use_easyocr_result(easyocr_text)
+                return self._use_easyocr_result(easyocr_text, quality_score)
 
         except Exception as e:
             return self._handle_extraction_error(e, image_path)
 
-    def _handle_fallback_to_vision(self, image_path: str, easyocr_text: str, easyocr_quality: float) -> str:
-        """Handle fallback to Vision OCR when EasyOCR quality is insufficient"""
+    def _handle_fallback_to_vision(self, image_path: str, easyocr_text: str, easyocr_quality: float) -> Tuple[str, str, float]:
+        """Handle fallback to Vision OCR when EasyOCR quality is insufficient
+
+        Returns: (text, method, quality_score)
+        """
         logger.warning(f"EasyOCR quality below threshold - falling back to Vision OCR for {image_path}")
 
         if self.debug_ocr:
@@ -233,20 +360,26 @@ class OCRService(ImageProcessingInterface):
             self._log_quality_breakdown(vision_reasoning, "VISION OCR")
             self._log_final_decision("VISION OCR", "EasyOCR quality below threshold")
 
-        return vision_text
+        return vision_text, 'fallback', vision_quality_score
 
-    def _use_easyocr_result(self, easyocr_text: str) -> str:
-        """Use EasyOCR result when quality is acceptable"""
+    def _use_easyocr_result(self, easyocr_text: str, quality_score: float) -> Tuple[str, str, float]:
+        """Use EasyOCR result when quality is acceptable
+
+        Returns: (text, method, quality_score)
+        """
         logger.info("Using EasyOCR result")
 
         if self.debug_ocr:
             self._log_final_decision("EASYOCR", "Quality acceptable")
             self._log_final_output(easyocr_text)
 
-        return easyocr_text
+        return easyocr_text, 'easyocr', quality_score
 
-    def _handle_extraction_error(self, error: Exception, image_path: str) -> str:
-        """Handle extraction errors with fallback mechanisms"""
+    def _handle_extraction_error(self, error: Exception, image_path: str) -> Tuple[str, str, float]:
+        """Handle extraction errors with fallback mechanisms
+
+        Returns: (text, method, quality_score)
+        """
         logger.error(f"Error in quality-based OCR extraction for {image_path}: {str(error)}")
 
         if self.debug_ocr:
@@ -256,7 +389,9 @@ class OCRService(ImageProcessingInterface):
         if isinstance(error, TextExtractionError) and "EasyOCR library bug" in str(error):
             logger.warning(f"EasyOCR library bug detected, attempting Vision OCR fallback for {image_path}")
             try:
-                return self._extract_vision_text(image_path)
+                vision_text = self._extract_vision_text(image_path)
+                vision_quality = self.score_ocr_quality(vision_text)
+                return vision_text, 'fallback', vision_quality
             except Exception as vision_error:
                 logger.error(f"Vision OCR fallback also failed for {image_path}: {str(vision_error)}")
                 if self.debug_ocr:
@@ -265,7 +400,9 @@ class OCRService(ImageProcessingInterface):
         else:
             # Standard fallback to basic EasyOCR without quality scoring
             try:
-                return self._extract_easyocr_text(image_path)
+                easyocr_text = self._extract_easyocr_text(image_path)
+                easyocr_quality = self.score_ocr_quality(easyocr_text)
+                return easyocr_text, 'easyocr', easyocr_quality
             except Exception as fallback_error:
                 logger.error(f"Fallback EasyOCR also failed for {image_path}: {str(fallback_error)}")
 
@@ -275,7 +412,9 @@ class OCRService(ImageProcessingInterface):
                 # Final fallback to Vision OCR
                 try:
                     logger.warning(f"Attempting final Vision OCR fallback for {image_path}")
-                    return self._extract_vision_text(image_path)
+                    vision_text = self._extract_vision_text(image_path)
+                    vision_quality = self.score_ocr_quality(vision_text)
+                    return vision_text, 'fallback', vision_quality
                 except Exception as vision_error:
                     logger.error(f"Final Vision OCR fallback also failed for {image_path}: {str(vision_error)}")
                     raise TextExtractionError(f"All OCR methods failed for {image_path}. Primary error: {str(error)}, EasyOCR fallback: {str(fallback_error)}, Vision fallback: {str(vision_error)}")
@@ -451,8 +590,8 @@ class OCRService(ImageProcessingInterface):
             raise TextExtractionError("Invalid preprocessed image")
 
         try:
-            # Run EasyOCR
-            results = self.ocr.readtext(processed['image_array'])
+            # Run EasyOCR (lazy initialization)
+            results = self._get_reader().readtext(processed['image_array'])
 
             # Debug: Log raw OCR output
             if self.debug:

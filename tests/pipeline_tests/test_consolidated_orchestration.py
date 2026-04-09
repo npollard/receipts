@@ -3,9 +3,6 @@
 import sys
 import os
 
-# Add the project root to the path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 def test_consolidated_orchestration():
     """Test the consolidated orchestration flow"""
     print("Testing consolidated orchestration flow...")
@@ -34,13 +31,15 @@ def test_consolidated_orchestration():
 
     except Exception as e:
         print(f"Initialization failed: {e}")
-        return False
+        assert False, f"Initialization failed: {e}"
 
     # Test 2: ReceiptProcessor with database
     print("\n=== TEST 2: DATABASE INITIALIZATION ===")
     try:
         from database_models import DatabaseManager
         db_manager = DatabaseManager()
+        # Create tables for test
+        db_manager.create_tables()
         processor_db = ReceiptProcessor(db_manager=db_manager)
         print("ReceiptProcessor initialized successfully with database")
 
@@ -52,7 +51,7 @@ def test_consolidated_orchestration():
 
     except Exception as e:
         print(f"Database initialization failed: {e}")
-        return False
+        assert False, f"Database initialization failed: {e}"
 
     # Test 3: Method availability and basic functionality
     print("\n=== TEST 3: METHOD FUNCTIONALITY ===")
@@ -78,7 +77,7 @@ def test_consolidated_orchestration():
 
     except Exception as e:
         print(f"Method functionality test failed: {e}")
-        return False
+        assert False, f"Method functionality test failed: {e}"
 
     # Test 4: Import compatibility
     print("\n=== TEST 4: IMPORT COMPATIBILITY ===")
@@ -86,14 +85,15 @@ def test_consolidated_orchestration():
         # Test the imports that main.py uses
         from pipeline.processor import (
             ReceiptProcessor,
-            process_batch_images,
             validate_and_get_image_files,
             print_batch_summary,
             print_token_usage_summary,
-            save_token_usage_to_persistence,
             print_usage_summary
         )
         print("All main.py imports work correctly")
+
+        # Note: process_batch_images removed (use BatchProcessingService directly)
+        # Note: save_token_usage_to_persistence removed (persistence moved to application layer)
 
         # Test legacy function
         from pipeline.processor import process_receipt
@@ -101,7 +101,7 @@ def test_consolidated_orchestration():
 
     except Exception as e:
         print(f"Import compatibility test failed: {e}")
-        return False
+        assert False, f"Import compatibility test failed: {e}"
 
     # Test 5: Pipeline functions
     print("\n=== TEST 5: PIPELINE FUNCTIONS ===")
@@ -125,7 +125,7 @@ def test_consolidated_orchestration():
 
     except Exception as e:
         print(f"Pipeline functions test failed: {e}")
-        return False
+        assert False, f"Pipeline functions test failed: {e}"
 
     # Test 6: Error handling
     print("\n=== TEST 6: ERROR HANDLING ===")
@@ -139,11 +139,11 @@ def test_consolidated_orchestration():
 
     except Exception as e:
         print(f"Error handling test failed: {e}")
-        return False
+        assert False, f"Error handling test failed: {e}"
 
     print("\n=== ALL TESTS PASSED ===")
     print("Consolidated orchestration flow is working correctly!")
-    return True
+    assert True
 
 def test_architecture_flow():
     """Test that the architecture flow is correct"""
@@ -159,6 +159,8 @@ def test_architecture_flow():
 
         # Initialize like main.py does
         db_manager = DatabaseManager()
+        # Create tables for test
+        db_manager.create_tables()
         processor = ReceiptProcessor(db_manager=db_manager)
 
         print("main.py flow works correctly")
@@ -186,11 +188,9 @@ def test_architecture_flow():
         print("Architecture flow: main.py -> pipeline -> services -> domain -> storage")
         print("All layers working correctly!")
 
-        return True
-
     except Exception as e:
         print(f"Architecture flow test failed: {e}")
-        return False
+        assert False, f"Architecture flow test failed: {e}"
 
 if __name__ == '__main__':
     success = test_consolidated_orchestration()

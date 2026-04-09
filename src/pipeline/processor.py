@@ -100,8 +100,8 @@ class ReceiptProcessor:
             ocr_text = self.image_processor.extract_text(image_path)
             logger.info(f"Extracted OCR text: {ocr_text[:100]}..." if len(ocr_text) > 100 else f"Extracted OCR text: {ocr_text}")
 
-            # Step 4: Parse with AI using interface
-            parse_result = self.receipt_parser.parse_text(ocr_text)
+            # Step 4: Parse with AI using validation-driven retry
+            parse_result = self.receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path)
 
             # Aggregate token usage from parsing result
             if parse_result.token_usage:

@@ -1,12 +1,13 @@
 """Image processing utilities"""
 
 import logging
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from contracts.interfaces import ImageProcessingInterface
-from services.ocr_service import OCRService
+from services.ocr_service import OCRService, OCRObservability
 
 logger = logging.getLogger(__name__)
 
@@ -51,31 +52,39 @@ class VisionProcessor(ImageProcessor, ImageProcessingInterface):
         """Public preprocessing API"""
         return self._preprocess_image(image_path)
 
+    def _extract_vision_text(self, image_path: str) -> str:
+        """Extract text using Vision LLM (OpenAI GPT-4 Vision)
+
+        This is the primary text extraction method for VisionProcessor.
+        No OCRService dependency - pure vision LLM approach.
+        """
+        from langchain_core.messages import HumanMessage
+        import base64
+
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": "Extract all text from this receipt image."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+            ]
+        )
+        response = self.vision_llm.invoke([message])
+        return response.content
+
     def extract_text(self, image_path: str, use_vision_fallback: bool = False) -> str:
-        """Extract text from image - tries LLM first if use_vision_fallback=True"""
-        if use_vision_fallback:
-            try:
-                # Try vision LLM first (allows mocking)
-                from langchain_core.messages import HumanMessage
-                import base64
+        """Extract text from image using Vision LLM only
 
-                with open(image_path, 'rb') as f:
-                    image_bytes = f.read()
-                image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-
-                message = HumanMessage(
-                    content=[
-                        {"type": "text", "text": "Extract all text from this receipt image."},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-                    ]
-                )
-                response = self.vision_llm.invoke([message])
-                return response.content
-            except Exception:
-                # LLM failed, fall back to OCR
-                pass
-
-        return self.ocr_service.extract_text(image_path)
+        Simple, deterministic: always use vision LLM, no OCR fallback.
+        This prevents EasyOCR from being triggered in tests.
+        """
+        start_time = time.time()
+        text = self._extract_vision_text(image_path)
+        duration_ms = (time.time() - start_time) * 1000
+        logger.info(f"Vision LLM OCR: {len(text)} chars in {duration_ms:.1f}ms")
+        return text
 
     def score_ocr_quality(self, text: str) -> float:
         """Score OCR text quality (0-1)"""
