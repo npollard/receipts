@@ -65,8 +65,10 @@ class Receipt(Base):
     id = Column(UUID_COL_TYPE, primary_key=True, default=UUID_DEFAULT)
     user_id = Column(UUID_COL_TYPE, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     image_path = Column(String(500), nullable=False)
-    receipt_hash = Column(String(64), unique=True, nullable=False)  # SHA-256 hash for deduplication
+    image_hash = Column(String(64), index=True)  # Hash of image file for duplicate detection
+    receipt_hash = Column(String(64), unique=True, nullable=True)  # SHA-256 hash for deduplication (set after processing)
     status = Column(String(20), nullable=False, default='pending')  # Processing status
+    processing_status = Column(String(20), default='pending')  # Detailed processing state
 
     # Receipt metadata
     receipt_date = Column(Date)
@@ -82,6 +84,9 @@ class Receipt(Base):
 
     # Parsed receipt data
     parsed_data = Column(Text)  # JSON as TEXT for SQLite compatibility
+
+    # Data hash for idempotency (duplicate detection based on receipt content)
+    receipt_data_hash = Column(String(64), index=True)
 
     # Processing metadata
     processing_started_at = Column(DateTime(timezone=True))

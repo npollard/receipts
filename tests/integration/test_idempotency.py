@@ -65,7 +65,7 @@ def test_receipt_data_hashing():
     assert hash_1 != hash_3, "Different receipt data should produce different hash"
 
     print("✅ Receipt data hashing works correctly!")
-    return True
+
 
 def test_database_idempotency():
     """Test database-level idempotency with receipt data"""
@@ -137,11 +137,10 @@ def test_database_idempotency():
         print("✅ No duplicate found for different data (as expected)")
 
         print("\n🎉 Database idempotency test passed!")
-        return True
 
     except Exception as e:
         print(f"❌ Test failed: {e}")
-        return False
+        raise
 
     finally:
         # Cleanup

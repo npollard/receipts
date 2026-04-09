@@ -132,9 +132,10 @@ class ReceiptPersistence:
         """Update receipt with successful parsing results"""
         session = self.db_manager.get_session()
         try:
+            user_id_for_db = handle_uuid_for_db(self.user_id)
             receipt = session.query(Receipt).filter(
                 Receipt.id == receipt_id,
-                Receipt.user_id == self.user_id
+                Receipt.user_id == user_id_for_db
             ).first()
 
             if not receipt:
@@ -150,24 +151,44 @@ class ReceiptPersistence:
             if parsed_response.success and parsed_response.data:
                 data = parsed_response.data
 
+                # Handle both dict and Pydantic model
+                if isinstance(data, dict):
+                    parsed_dict = data.copy()
+                    receipt_date = data.get('date')
+                    total_amount = data.get('total')
+                    merchant_name = data.get('merchant')
+                    items = data.get('items', [])
+                else:
+                    # Pydantic model
+                    receipt_date = data.date
+                    total_amount = data.total
+                    merchant_name = data.merchant
+                    items = data.items if hasattr(data, 'items') else []
+                    parsed_dict = data.model_dump()
+
+                # Compute hash BEFORE modifying values (for consistent duplicate detection)
+                receipt.receipt_data_hash = calculate_receipt_data_hash(parsed_dict)
+
                 # Update receipt with parsed data
-                receipt.receipt_date = parse_receipt_date(data.date)
-                receipt.total_amount = data.total
-                receipt.merchant_name = extract_merchant_name(receipt.raw_ocr_text, data.model_dump())
-                # Convert model_dump to JSON-serializable format
-                parsed_dict = data.model_dump()
-                # Convert Decimals to strings for JSON storage
-                if 'total' in parsed_dict and parsed_dict['total'] is not None:
-                    parsed_dict['total'] = str(parsed_dict['total'])
-                if 'items' in parsed_dict:
-                    for item in parsed_dict['items']:
+                receipt.receipt_date = parse_receipt_date(receipt_date)
+                receipt.total_amount = total_amount
+                receipt.merchant_name = merchant_name or extract_merchant_name(receipt.raw_ocr_text, parsed_dict)
+
+                # Convert to JSON-serializable format for storage
+                storage_dict = parsed_dict.copy()
+                if 'total' in storage_dict and storage_dict['total'] is not None:
+                    storage_dict['total'] = str(storage_dict['total'])
+                if 'items' in storage_dict:
+                    for item in storage_dict['items']:
                         if 'price' in item and item['price'] is not None:
                             item['price'] = str(item['price'])
-                receipt.parsed_data = parsed_dict
+                # Serialize to JSON string for database storage
+                import json
+                receipt.parsed_data = json.dumps(storage_dict)
 
                 # Create receipt items
-                if 'items' in data and data['items']:
-                    self._create_receipt_items(session, receipt.id, data['items'])
+                if items:
+                    self._create_receipt_items(session, receipt.id, items)
 
             session.commit()
             session.refresh(receipt)
