@@ -4,11 +4,10 @@ import logging
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional, Dict, Any, List, Union, Tuple
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from sqlalchemy import text, func
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError, IntegrityError, OperationalError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 
 from config import DATABASE_URL
 from core.hashing import calculate_image_hash, calculate_receipt_data_hash
@@ -21,9 +20,9 @@ from api_response import APIResponse
 from models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel
 
 from .models import (
-    Base, User, Receipt, ReceiptItem,
+    Receipt, ReceiptItem,
     parse_receipt_date, extract_merchant_name, get_uuid_column,
-    UUID_COL_TYPE, UUID_DEFAULT
+    UUID_COL_TYPE
 )
 from .session import get_session, get_read_session
 from shared.models.receipt_dto import ReceiptDTO
@@ -109,7 +108,7 @@ class IdempotencyHelper:
 
     def check_existing_receipt_by_data_hash(self, user_id: str, receipt_data: Dict[str, Any]) -> Optional[Receipt]:
         """Check if receipt already exists by data hash"""
-        receipt_data_hash = calculate_data_hash(receipt_data)
+        receipt_data_hash = calculate_receipt_data_hash(receipt_data)
 
         try:
             receipt = self.session.query(Receipt).filter(
@@ -228,7 +227,8 @@ class ReceiptRepository:
 
             if existing_receipt:
                 logger.info(f"Returning existing receipt due to idempotency: {existing_receipt.id}")
-                return existing_receipt, "duplicate"
+                from .mappers import receipt_to_dto
+                return receipt_to_dto(existing_receipt), "duplicate"
 
             # Calculate image hash
             try:
@@ -432,44 +432,3 @@ class ReceiptRepository:
             return [receipt_to_dto(r) for r in receipts]
 
 
-# Module-level connection cache for helper functions
-_connection_cache: Dict[str, DatabaseConnection] = {}
-
-
-def with_database_session(func):
-    """Decorator to provide database session"""
-    from functools import wraps
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        conn = get_database_connection()
-        with conn.session_scope() as session:
-            kwargs['session'] = session
-            return func(*args, **kwargs)
-    return wrapper
-
-
-def with_transaction(func):
-    """Decorator to provide transactional scope"""
-    from functools import wraps
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        conn = get_database_connection()
-        with conn.transaction_scope() as session:
-            kwargs['session'] = session
-            return func(*args, **kwargs)
-    return wrapper
-
-
-def get_database_connection(database_url: Optional[str] = None) -> DatabaseConnection:
-    """Get or create database connection (singleton per URL)"""
-    url = database_url or DATABASE_URL
-    if url not in _connection_cache:
-        _connection_cache[url] = DatabaseConnection(url)
-    return _connection_cache[url]
-
-
-def close_all_connections():
-    """Close all cached database connections"""
-    for conn in _connection_cache.values():
-        conn.close()
-    _connection_cache.clear()

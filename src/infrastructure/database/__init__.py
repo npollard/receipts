@@ -16,10 +16,6 @@ from .repository import (
     DatabaseConnection as DatabaseQueryHelper,  # Backward compatibility
     ReceiptRepository,
     handle_uuid_for_db,
-    with_database_session,
-    with_transaction,
-    get_database_connection,
-    close_all_connections,
 )
 
 from .user_repository import (
@@ -62,10 +58,6 @@ __all__ = [
     'ReceiptRepository',
     'UserRepository',
     'handle_uuid_for_db',
-    'with_database_session',
-    'with_transaction',
-    'get_database_connection',
-    'close_all_connections',
     # Session
     'get_session',
     'get_read_session',
