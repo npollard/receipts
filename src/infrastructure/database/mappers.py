@@ -181,3 +181,32 @@ def receipt_to_dict(receipt: OrmReceipt) -> dict:
         "created_at": receipt.created_at,
         "updated_at": receipt.updated_at,
     }
+
+
+def receipt_to_dto(receipt: OrmReceipt) -> "ReceiptDTO":
+    """Convert ORM Receipt entity to ReceiptDTO.
+
+    Args:
+        receipt: ORM Receipt entity
+
+    Returns:
+        ReceiptDTO instance
+    """
+    from shared.models.receipt_dto import ReceiptDTO
+    return ReceiptDTO(
+        id=str(receipt.id) if receipt.id else "",
+        user_id=str(receipt.user_id) if receipt.user_id else None,
+        image_path=receipt.image_path,
+        image_hash=receipt.image_hash,
+        receipt_data_hash=receipt.receipt_data_hash,
+        status=receipt.status,
+        processing_status=receipt.processing_status,
+        receipt_date=receipt.receipt_date.isoformat() if receipt.receipt_date else None,
+        merchant_name=receipt.merchant_name,
+        total_amount=float(receipt.total_amount) if receipt.total_amount else None,
+        input_tokens=receipt.input_tokens,
+        output_tokens=receipt.output_tokens,
+        estimated_cost=float(receipt.estimated_cost) if receipt.estimated_cost else None,
+        created_at=receipt.created_at,
+        updated_at=receipt.updated_at,
+    )

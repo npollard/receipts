@@ -41,7 +41,10 @@ from .mappers import (
     domain_item_to_orm,
     orm_item_to_domain,
     receipt_to_dict,
+    receipt_to_dto,
 )
+
+from shared.models.receipt_dto import ReceiptDTO
 
 __all__ = [
     # Models
@@ -76,4 +79,7 @@ __all__ = [
     'domain_item_to_orm',
     'orm_item_to_domain',
     'receipt_to_dict',
+    'receipt_to_dto',
+    # DTOs
+    'ReceiptDTO',
 ]

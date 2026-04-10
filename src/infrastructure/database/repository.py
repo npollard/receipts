@@ -26,6 +26,7 @@ from .models import (
     UUID_COL_TYPE, UUID_DEFAULT
 )
 from .session import get_session, get_read_session
+from shared.models.receipt_dto import ReceiptDTO
 
 logger = get_storage_logger(__name__)
 
@@ -180,7 +181,7 @@ class ReceiptRepository:
                 "is_active": user.is_active,
             }
 
-    def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[dict]:
+    def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[ReceiptDTO]:
         """Check if receipt already exists by image hash"""
         with get_read_session(self.database_url) as session:
             receipt_hash = calculate_image_hash(image_path)
@@ -191,11 +192,11 @@ class ReceiptRepository:
 
             if receipt:
                 logger.info(f"Found duplicate receipt by image hash: {receipt.id}")
-                from .mappers import receipt_to_dict
-                return receipt_to_dict(receipt)
+                from .mappers import receipt_to_dto
+                return receipt_to_dto(receipt)
             return None
 
-    def check_duplicate_receipt_data(self, receipt_data: Dict[str, Any]) -> Optional[dict]:
+    def check_duplicate_receipt_data(self, receipt_data: Dict[str, Any]) -> Optional[ReceiptDTO]:
         """Check if receipt data already exists by data hash"""
         with get_read_session(self.database_url) as session:
             receipt_data_hash = calculate_receipt_data_hash(receipt_data)
@@ -206,14 +207,14 @@ class ReceiptRepository:
 
             if receipt:
                 logger.info(f"Found duplicate receipt by data hash: {receipt.id}")
-                from .mappers import receipt_to_dict
-                return receipt_to_dict(receipt)
+                from .mappers import receipt_to_dto
+                return receipt_to_dto(receipt)
             return None
 
     def save_receipt(self, image_path: str, ocr_text: str, parsed_response: APIResponse,
                     input_tokens: int = 0, output_tokens: int = 0,
                     estimated_cost: Decimal = Decimal('0.000000'),
-                    ocr_confidence: Optional[float] = None) -> Tuple[dict, str]:
+                    ocr_confidence: Optional[float] = None) -> Tuple[ReceiptDTO, str]:
         """Save a complete receipt with OCR and parsed data with idempotency"""
         # Validate inputs
         if not image_path or not isinstance(image_path, str):
@@ -298,8 +299,8 @@ class ReceiptRepository:
                     raise StorageError(f"Failed to save receipt items: {str(e)}")
 
             logger.info(f"Successfully saved receipt {receipt.id} for user {self.user_id}")
-            from .mappers import receipt_to_dict
-            return receipt_to_dict(receipt), "created"
+            from .mappers import receipt_to_dto
+            return receipt_to_dto(receipt), "created"
 
     def _save_receipt_items(self, session, receipt_id: UUID, items: List[ReceiptItemModel]):
         """Save receipt items with proper error handling"""
@@ -335,7 +336,7 @@ class ReceiptRepository:
         except Exception as e:
             raise StorageError(f"Unexpected error in _save_receipt_items: {str(e)}")
 
-    def create_pending_receipt(self, image_path: str, ocr_text: str, ocr_confidence: Optional[float] = None) -> Receipt:
+    def create_pending_receipt(self, image_path: str, ocr_text: str, ocr_confidence: Optional[float] = None) -> ReceiptDTO:
         """Create a new receipt record in pending status"""
         with get_session(self.database_url) as session:
             receipt_hash = calculate_image_hash(image_path)
@@ -360,8 +361,8 @@ class ReceiptRepository:
             session.flush()
             session.refresh(receipt)
 
-            from .mappers import receipt_to_dict
-            return receipt_to_dict(receipt)
+            from .mappers import receipt_to_dto
+            return receipt_to_dto(receipt)
 
     def update_failure(self, receipt_id: UUID, error_message: str):
         """Update receipt status to failed with error message"""
@@ -376,7 +377,7 @@ class ReceiptRepository:
 
     def update_receipt_success(self, receipt_id: UUID, parsed_response: APIResponse,
                                input_tokens: int = 0, output_tokens: int = 0,
-                               estimated_cost: Decimal = Decimal('0.000000')) -> dict:
+                               estimated_cost: Decimal = Decimal('0.000000')) -> ReceiptDTO:
         """Update receipt with successful parsing results"""
         receipt_id_for_db = handle_uuid_for_db(receipt_id)
         with get_session(self.database_url) as session:
@@ -423,15 +424,15 @@ class ReceiptRepository:
                 session.flush()
                 session.refresh(receipt)
 
-                from .mappers import receipt_to_dict
-                return receipt_to_dict(receipt)
+                from .mappers import receipt_to_dto
+                return receipt_to_dto(receipt)
 
-            # If not success, still return dict
-            from .mappers import receipt_to_dict
-            return receipt_to_dict(receipt)
+            # If not success, still return DTO
+            from .mappers import receipt_to_dto
+            return receipt_to_dto(receipt)
 
     def fetch_user_receipts(self, limit: int = 50, offset: int = 0,
-                           order_by: str = 'created_at', order_dir: str = 'desc') -> List[dict]:
+                           order_by: str = 'created_at', order_dir: str = 'desc') -> List[ReceiptDTO]:
         """Fetch receipts for current user"""
         with get_read_session(self.database_url) as session:
             query = session.query(Receipt).filter(Receipt.user_id == self._user_id_for_db)
@@ -444,8 +445,8 @@ class ReceiptRepository:
                 query = query.order_by(order_column.asc())
 
             receipts = query.offset(offset).limit(limit).all()
-            from .mappers import receipt_to_dict
-            return [receipt_to_dict(r) for r in receipts]
+            from .mappers import receipt_to_dto
+            return [receipt_to_dto(r) for r in receipts]
 
 
 # Module-level connection cache for helper functions

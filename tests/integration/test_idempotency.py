@@ -136,18 +136,18 @@ def test_database_idempotency():
         # Update with success (this will set the data hash)
         success_response = APIResponse.success(receipt_data)
         updated_receipt_1 = repository.update_receipt_success(
-            receipt_1["id"], success_response, 100, 50, 0.000150
+            receipt_1.id, success_response, 100, 50, 0.000150
         )
 
-        print(f"✅ Created receipt: {updated_receipt_1['id']}")
-        print(f"   Data hash: {updated_receipt_1['receipt_data_hash']}")
+        print(f"✅ Created receipt: {updated_receipt_1.id}")
+        print(f"   Data hash: {updated_receipt_1.receipt_data_hash}")
 
         # Second attempt with same data - should find duplicate
         print("\n📝 Second processing attempt with same data...")
         duplicate_2 = repository.check_duplicate_receipt_data(receipt_data)
         assert duplicate_2 is not None, "Second attempt should find duplicate"
-        assert duplicate_2["id"] == updated_receipt_1["id"], "Should find the same receipt"
-        print(f"✅ Found duplicate receipt: {duplicate_2['id']}")
+        assert duplicate_2.id == updated_receipt_1.id, "Should find the same receipt"
+        print(f"✅ Found duplicate receipt: {duplicate_2.id}")
 
         # Third attempt with different data - should not find duplicate
         print("\n📝 Third processing attempt with different data...")
