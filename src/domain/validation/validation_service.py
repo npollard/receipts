@@ -4,7 +4,7 @@ import json
 from decimal import Decimal
 from pydantic import ValidationError
 
-from models.receipt import Receipt
+from domain.models.receipt import Receipt
 from api_response import APIResponse
 from core.logging import get_validation_logger
 from core.exceptions import ValidationError as CustomValidationError

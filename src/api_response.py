@@ -1,7 +1,7 @@
 """API response utilities"""
 
 from typing import Any, Optional
-from models.receipt import Receipt as ReceiptModel
+from domain.models.receipt import Receipt as ReceiptModel
 
 
 class APIResponse:

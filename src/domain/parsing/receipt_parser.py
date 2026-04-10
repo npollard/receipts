@@ -11,7 +11,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
 from contracts.interfaces import ReceiptParsingInterface
-from models.receipt import Receipt
+from domain.models.receipt import Receipt
 from api_response import APIResponse
 from tracking import TokenUsage, extract_token_usage
 from domain.validation.validation_service import ValidationService

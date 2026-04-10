@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional, List
 
-from models.receipt import Receipt as DomainReceipt, ReceiptItem as DomainReceiptItem
+from domain.models.receipt import Receipt as DomainReceipt, ReceiptItem as DomainReceiptItem
 from .models import Receipt as OrmReceipt, ReceiptItem as OrmReceiptItem
 
 

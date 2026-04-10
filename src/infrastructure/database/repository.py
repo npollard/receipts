@@ -17,7 +17,7 @@ from core.exceptions import (
     IdempotencyError
 )
 from api_response import APIResponse
-from models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel
+from domain.models.receipt import Receipt as ReceiptModel, ReceiptItem as ReceiptItemModel
 
 from .models import (
     Receipt, ReceiptItem,

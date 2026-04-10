@@ -6,7 +6,7 @@ import json
 from decimal import Decimal
 from pydantic import ValidationError
 
-from models.receipt import Receipt
+from domain.models.receipt import Receipt
 from api_response import APIResponse
 from .validation_service import ValidationService
 

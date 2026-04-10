@@ -1,6 +1,6 @@
 """Receipt processing package"""
 
-from .models import Receipt, ReceiptItem
+from domain.models.receipt import Receipt, ReceiptItem
 from .api_response import APIResponse
 from .tracking import TokenUsage
 from .image_processing import ImageProcessor, VisionProcessor

@@ -3,7 +3,7 @@
 import pytest
 from decimal import Decimal
 from pydantic import ValidationError
-from models.receipt import Receipt, ReceiptItem
+from domain.models.receipt import Receipt, ReceiptItem
 
 
 def test_receipt_item_valid_creation():

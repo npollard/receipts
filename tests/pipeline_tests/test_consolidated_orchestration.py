@@ -178,7 +178,7 @@ def test_architecture_flow():
         print("Services layer: OK")
 
         # Domain layer (services use these)
-        from models.receipt import Receipt
+        from domain.models.receipt import Receipt, ReceiptItem
         print("Domain layer: OK")
 
         # Storage layer (processor uses these)
