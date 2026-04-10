@@ -66,7 +66,7 @@ TOKENS: 1670 | OCR: 245ms | Total: 1450ms
 ## Learn More
 
 See `/docs` for:
-- Concurrency model deep dive
-- Retry strategies explained
-- Architecture diagrams
-- Testing guide
+- [Concurrency model](docs/concurrency.md)
+- [Retry strategies](docs/retry-strategies.md)
+- [Architecture deep dive](docs/architecture.md)
+- [Testing guide](docs/testing.md)
