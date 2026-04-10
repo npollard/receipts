@@ -204,34 +204,6 @@ class ReceiptItem(Base):
     )
 
 
-class DatabaseManager:
-    """Database session management"""
-
-    def __init__(self, database_url: Optional[str] = None):
-        self.database_url = database_url or DATABASE_URL
-        self.engine = create_engine(self.database_url)
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
-
-    def create_tables(self):
-        """Create all database tables"""
-        Base.metadata.create_all(bind=self.engine)
-
-    def get_session(self) -> Session:
-        """Get a database session"""
-        return self.SessionLocal()
-
-    def close(self):
-        """Close database connections"""
-        self.engine.dispose()
-
-    @property
-    def database_path(self) -> Optional[str]:
-        """Get database file path for SQLite"""
-        if self.database_url.startswith("sqlite"):
-            return str(DATABASE_PATH)
-        return None
-
-
 def parse_receipt_date(date_value: Any) -> Optional[date]:
     """Parse receipt date from various formats"""
     if date_value is None:

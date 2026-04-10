@@ -1,16 +1,42 @@
 """Test receipt data idempotency functionality"""
 
 import os
+import sys
 import json
+import tempfile
 from uuid import uuid4
 from dotenv import load_dotenv
 
-from database_models import DatabaseManager
-from core.hashing import calculate_receipt_data_hash
-from receipt_persistence import ReceiptPersistence
-
 # Load environment variables
 load_dotenv()
+
+# Add src to path first
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+
+# Clear any cached modules to ensure fresh imports
+for mod in list(sys.modules.keys()):
+    if 'infrastructure' in mod or 'config' in mod or 'models' in mod or 'database' in mod:
+        del sys.modules[mod]
+
+# Set up temp database BEFORE importing database modules
+temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+temp_db.close()
+
+# Remove any existing test database file
+if os.path.exists(temp_db.name):
+    os.remove(temp_db.name)
+
+os.environ["DATABASE_URL"] = f"sqlite:///{temp_db.name}"
+
+# Now import fresh modules with patched config
+import config.settings
+config.settings.DATABASE_URL = os.environ["DATABASE_URL"]
+config.settings.DATABASE_PATH = temp_db.name
+
+# Import database modules (fresh imports after patching)
+from infrastructure.database import DatabaseManager, ReceiptRepository
+from infrastructure.database.session import create_tables_for_url
+from core.hashing import calculate_receipt_data_hash
 
 def test_receipt_data_hashing():
     """Test receipt data hash generation and consistency"""
@@ -70,20 +96,17 @@ def test_receipt_data_hashing():
 def test_database_idempotency():
     """Test database-level idempotency with receipt data"""
 
-    # Database configuration (use unique temp file per test to avoid locking issues)
-    import tempfile
-    temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    temp_db.close()
-    DATABASE_URL = f"sqlite:///{temp_db.name}"
+    # Use the patched DATABASE_URL from module level
+    DATABASE_URL = os.environ["DATABASE_URL"]
 
-    # Initialize database manager
+    # Initialize database manager (creates tables in temp DB)
     db_manager = DatabaseManager(DATABASE_URL)
     db_manager.create_tables()
 
     # Create test user
     user_id = uuid4()
-    persistence = ReceiptPersistence(db_manager, user_id)
-    user = persistence.get_or_create_user("test@example.com")
+    repository = ReceiptRepository(user_id, db_manager.database_url)
+    user = repository.get_or_create_user("test@example.com")
 
     # Sample receipt data
     receipt_data = {
@@ -99,7 +122,7 @@ def test_database_idempotency():
     try:
         # First attempt - should create new receipt
         print("📝 First processing attempt...")
-        duplicate_1 = persistence.check_duplicate_receipt_data(receipt_data)
+        duplicate_1 = repository.check_duplicate_receipt_data(receipt_data)
         assert duplicate_1 is None, "First attempt should not find duplicate"
         print("✅ No duplicate found (as expected)")
 
@@ -108,11 +131,11 @@ def test_database_idempotency():
         from datetime import datetime
 
         # Create pending receipt
-        receipt_1 = persistence.create_pending_receipt("test_image_1.jpg", "OCR text here")
+        receipt_1 = repository.create_pending_receipt("test_image_1.jpg", "OCR text here")
 
         # Update with success (this will set the data hash)
         success_response = APIResponse.success(receipt_data)
-        updated_receipt_1 = persistence.update_receipt_success(
+        updated_receipt_1 = repository.update_receipt_success(
             receipt_1.id, success_response, 100, 50, 0.000150
         )
 
@@ -121,7 +144,7 @@ def test_database_idempotency():
 
         # Second attempt with same data - should find duplicate
         print("\n📝 Second processing attempt with same data...")
-        duplicate_2 = persistence.check_duplicate_receipt_data(receipt_data)
+        duplicate_2 = repository.check_duplicate_receipt_data(receipt_data)
         assert duplicate_2 is not None, "Second attempt should find duplicate"
         assert duplicate_2.id == updated_receipt_1.id, "Should find the same receipt"
         print(f"✅ Found duplicate receipt: {duplicate_2.id}")
@@ -132,7 +155,7 @@ def test_database_idempotency():
         different_data["total"] = 30.00
         different_data["items"][0]["price"] = 14.50
 
-        duplicate_3 = persistence.check_duplicate_receipt_data(different_data)
+        duplicate_3 = repository.check_duplicate_receipt_data(different_data)
         assert duplicate_3 is None, "Different data should not find duplicate"
         print("✅ No duplicate found for different data (as expected)")
 

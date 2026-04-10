@@ -76,6 +76,34 @@ The application enforces **no nested parallelism**:
 
 ## Architecture Overview
 
+### Clean Architecture Layers
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Interface Layer                       │
+│  (CLI: main.py, API endpoints - not yet implemented)   │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                   Application Layer                    │
+│  (BatchProcessingService - orchestrates workflow)        │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                     Domain Layer                       │
+│  (ReceiptParser, ValidationService - business logic)      │
+│  No dependencies on infrastructure or services          │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                  Infrastructure Layer                  │
+│  (OCRService, Vision OCR, Database)                     │
+└─────────────────────────────────────────────────────────┘
+```
+
 ### Pipeline Flow
 
 ```
@@ -90,19 +118,15 @@ The application enforces **no nested parallelism**:
               │ OpenAI Vision   │◄───────────────────────────────────┘
               │ (fallback)      │          (retry with corrections)
               └─────────────────┘
-                        │
-                        ▼
-        ┌───────────────────────────────┐
-        │   SQLite / PostgreSQL Storage  │
-        │   + Token Usage Persistence    │
-        └───────────────────────────────┘
 ```
 
 **Key Design Decisions:**
-- **Interface-driven design**: `ImageProcessingInterface` and `ReceiptParsingInterface` enable clean dependency injection and testability
+- **Interface-driven design**: `ImageProcessingInterface` and `ReceiptParsingInterface` enforce contracts, enable DI and testability
+- **Clean architecture**: Domain layer has no dependencies on infrastructure or services
+- **Single source of truth**: No `hasattr` branching; interfaces define explicit methods
 - **Local OCR first**: EasyOCR runs locally (free, fast), falls back to OpenAI Vision only when quality is low
 - **Lazy initialization**: OCRService is only instantiated when needed, preventing heavy imports during tests
-- **Structured validation**: Pydantic models enforce schema + data types
+- **Structured validation**: Pydantic v2 models enforce schema + data types
 - **Retry strategies adapt to error severity**: Small errors → self-correction; Large errors → RAG or OCR reprocessing
 - **Always preserve parsed data**: Even failed validations return partial results for debugging
 - **Deterministic OCR scoring**: Structured scoring with clear thresholds (bad ≤0.4, medium ≥0.3, good ≥0.5)
@@ -346,6 +370,10 @@ python -m pytest tests/test_models.py -v
 - [x] **Execution modes**: dev/local/cloud with different parallelism profiles
 - [x] **OCR observability**: Per-image timing, OCR method tracking, quality scoring
 - [x] **Runtime guard**: No nested parallelism enforcement
+- [x] **Clean architecture**: Domain layer isolated from infrastructure
+- [x] **Interface standardization**: Removed `hasattr` branching, single method per interface
+- [x] **Pydantic v2**: Upgraded from v1, removed `ForwardRef._evaluate`
+- [x] **LangChain v2**: Updated imports to `langchain_openai` / `langchain_core`
 
 ### In Progress / Planned
 - [ ] Experiment with PaddleOCR for cost/quality comparison
@@ -362,30 +390,39 @@ python -m pytest tests/test_models.py -v
 receipts/
 ├── main.py                    # CLI entry point
 ├── pyproject.toml             # Project configuration (pytest, dependencies)
+├── requirements.txt           # Pinned dependency versions
 ├── src/                       # Application source code
 │   ├── config/
 │   │   ├── settings.py        # AppConfig, DatabaseConfig
 │   │   └── runtime_config.py  # RuntimeConfig, ExecutionMode, thread limits
-│   ├── pipeline/
-│   │   └── processor.py       # ReceiptProcessor orchestration with DI
+│   ├── contracts/
+│   │   └── interfaces.py      # Abstract interfaces (ImageProcessingInterface, etc.)
+│   ├── core/
+│   │   ├── common_types.py    # Shared types (APIResponse, TokenUsage)
+│   │   ├── exceptions.py      # Custom exceptions
+│   │   └── logging.py         # Logging utilities
 │   ├── domain/
+│   │   ├── models/            # Pydantic models (ReceiptModel)
 │   │   ├── parsing/
 │   │   │   └── receipt_parser.py  # LLM parsing + retry strategies
 │   │   └── validation/
-│   │       └── validation_service.py  # Pydantic validation
+│   │       └── validation_service.py  # Pydantic v2 validation
+│   ├── infrastructure/        # External adapters (database, persistence)
+│   ├── pipeline/
+│   │   └── processor.py       # Pure orchestrator (no persistence, no business logic)
 │   ├── services/
-│   │   ├── ocr_service.py     # EasyOCR + Vision fallback (lazy init, thread-safe)
 │   │   ├── batch_service.py   # Multi-image processing with ProcessPoolExecutor
-│   │   └── token_service.py   # Usage aggregation
-│   ├── contracts/
-│   │   └── interfaces.py      # ImageProcessingInterface, ReceiptParsingInterface
+│   │   ├── file_service.py    # File handling utilities
+│   │   ├── ocr_service.py     # EasyOCR + Vision fallback (lazy init, thread-safe)
+│   │   └── token_service.py   # Token usage tracking
+│   ├── tracking.py            # TokenUsage dataclass
 │   └── image_processing.py    # VisionProcessor with DI support
 │
 ├── tests/
 │   ├── fakes/                 # Test doubles for DI
 │   │   ├── fake_vision_processor.py
 │   │   └── fake_receipt_parser.py
-│   ├── integration/           # End-to-end tests with fakes
+│   ├── integration/           # End-to-end tests with fakes (no EasyOCR)
 │   ├── domain/                # Domain layer tests
 │   └── services/              # Service layer tests
 └── imgs/                      # Place receipt images here
@@ -393,26 +430,50 @@ receipts/
 
 ## Development Setup
 
-The project uses a **src layout** to ensure clean imports and prevent module shadowing.
+### Prerequisites
+
+- Python 3.10+
+- OpenAI API key (for LLM parsing and OCR fallback)
+
+### Installation
+
+```bash
+# Clone and setup
+git clone <repository-url>
+cd receipts
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies (pinned versions for reproducibility)
+python -m pip install -r requirements.txt
+
+# Install package in editable mode (enables imports without PYTHONPATH)
+pip install -e .
+
+# Configure environment
+export OPENAI_API_KEY="your-key-here"
+mkdir -p imgs  # Place receipt images here
+```
 
 ### Import Resolution
 
+The project uses a **src layout** to ensure clean imports and prevent module shadowing:
+
 - **pytest** is configured via `pyproject.toml` with `testpaths = ["tests"]`
-- **pip install -e .** installs the package in editable mode, enabling imports without PYTHONPATH
+- **pip install -e .** installs the package in editable mode
 - Tests import from source modules directly: `from pipeline.processor import ReceiptProcessor`
 
 ### Running Tests
 
 ```bash
-# Run all tests (imports resolve via src/)
-pytest
-
-# Or explicitly
+# Run all tests (89 tests)
 python -m pytest tests/ -v
 
-# Run specific test modules
-pytest tests/pipeline_tests/ -v
-pytest tests/integration/ -v
+# Run integration tests with fakes (fast, no EasyOCR)
+python -m pytest tests/integration/ -v
+
+# Run OCR scoring tests
+python -m pytest tests/services/ocr/test_ocr_scoring.py -v
 ```
 
 ### Running the Application
@@ -420,6 +481,9 @@ pytest tests/integration/ -v
 ```bash
 # Run directly (after pip install -e .)
 python main.py
+
+# Or with execution mode
+EXECUTION_MODE=local python main.py
 ```
 
 ### Project Configuration
@@ -427,9 +491,3 @@ python main.py
 All project configuration is centralized in `pyproject.toml`:
 - pytest: `testpaths = ["tests"]` for test discovery
 - Build system: setuptools with src layout (via `pip install -e .`)
-
-TODO:
-- [ ] Frontend app for image ingestion
-- [ ] REST API for external integrations
-- [ ] Horizontal scaling (cloud mode ready)
-- [ ] Experiment with OCR models - PaddleOCR comparison

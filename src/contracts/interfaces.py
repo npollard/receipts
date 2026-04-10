@@ -41,6 +41,11 @@ class ReceiptParsingInterface(ABC):
         """Get token usage from parsing operations"""
         pass
 
+    @abstractmethod
+    def get_current_retries(self) -> List[str]:
+        """Get list of retry strategies used in current parsing session"""
+        pass
+
 
 class BatchProcessingInterface(ABC):
     """Interface for batch processing operations"""

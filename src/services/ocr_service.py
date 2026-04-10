@@ -49,6 +49,7 @@ from core.exceptions import (
 )
 from config.ocr_config import OCRConfig, ENV_OCR_CONFIG
 from contracts.interfaces import ImageProcessingInterface
+from domain.validation import score_ocr_quality, should_fallback, get_fallback_reasoning
 
 logger = get_ocr_logger(__name__)
 
@@ -192,7 +193,7 @@ class OCRService(ImageProcessingInterface):
         start_time = time.time()
 
         if use_vision_fallback:
-            logger.info("Using Vision OCR fallback")
+            logger.debug("Using Vision OCR fallback")
             text = self._extract_vision_text(image_path)
             end_time = time.time()
             obs = OCRObservability(
@@ -329,7 +330,7 @@ class OCRService(ImageProcessingInterface):
             easyocr_text = self._extract_easyocr_text(image_path)
             quality_score = self.score_ocr_quality(easyocr_text)
 
-            logger.info(f"EasyOCR Quality Score: {quality_score:.3f} (threshold: {self.quality_threshold:.3f}) for {image_path}")
+            logger.debug(f"EasyOCR Quality Score: {quality_score:.3f} (threshold: {self.quality_threshold:.3f}) for {image_path}")
 
             if self.debug_ocr:
                 reasoning = self.get_fallback_reasoning(easyocr_text, self.quality_threshold)
@@ -365,7 +366,7 @@ class OCRService(ImageProcessingInterface):
         vision_text = self._extract_vision_text(image_path)
         vision_quality_score = self.score_ocr_quality(vision_text)
 
-        logger.info(f"Vision OCR Quality Score: {vision_quality_score:.3f} for {image_path}")
+        logger.debug(f"Vision OCR Quality Score: {vision_quality_score:.3f} for {image_path}")
 
         if self.debug_ocr:
             vision_reasoning = self.get_fallback_reasoning(vision_text, self.quality_threshold)
@@ -380,7 +381,7 @@ class OCRService(ImageProcessingInterface):
 
         Returns: (text, method, quality_score, attempted_methods)
         """
-        logger.info("Using EasyOCR result")
+        logger.debug("Using EasyOCR result")
 
         if self.debug_ocr:
             self._log_final_decision("EASYOCR", "Quality acceptable")
@@ -398,41 +399,27 @@ class OCRService(ImageProcessingInterface):
         if self.debug_ocr:
             self._log_error_handling(error)
 
-        # Check if this is the EasyOCR library bug
-        if isinstance(error, TextExtractionError) and "EasyOCR library bug" in str(error):
-            logger.warning(f"EasyOCR library bug detected, attempting Vision OCR fallback for {image_path}")
+        # Standard fallback to basic EasyOCR without quality scoring
+        try:
+            easyocr_text = self._extract_easyocr_text(image_path)
+            easyocr_quality = self.score_ocr_quality(easyocr_text)
+            return easyocr_text, 'easyocr', easyocr_quality, attempted_methods
+        except Exception as fallback_error:
+            logger.error(f"Fallback EasyOCR also failed for {image_path}: {str(fallback_error)}")
+
+            if self.debug_ocr:
+                self._log_catastrophic_failure(error, fallback_error)
+
+            # Final fallback to Vision OCR
             try:
+                logger.warning(f"Attempting final Vision OCR fallback for {image_path}")
                 vision_text = self._extract_vision_text(image_path)
                 vision_quality = self.score_ocr_quality(vision_text)
                 attempted_methods.append("vision")
                 return vision_text, 'fallback', vision_quality, attempted_methods
             except Exception as vision_error:
-                logger.error(f"Vision OCR fallback also failed for {image_path}: {str(vision_error)}")
-                if self.debug_ocr:
-                    self._log_catastrophic_failure(error, vision_error)
-                raise TextExtractionError(f"All OCR methods failed for {image_path}. EasyOCR bug: {str(error)}, Vision error: {str(vision_error)}")
-        else:
-            # Standard fallback to basic EasyOCR without quality scoring
-            try:
-                easyocr_text = self._extract_easyocr_text(image_path)
-                easyocr_quality = self.score_ocr_quality(easyocr_text)
-                return easyocr_text, 'easyocr', easyocr_quality, attempted_methods
-            except Exception as fallback_error:
-                logger.error(f"Fallback EasyOCR also failed for {image_path}: {str(fallback_error)}")
-
-                if self.debug_ocr:
-                    self._log_catastrophic_failure(error, fallback_error)
-
-                # Final fallback to Vision OCR
-                try:
-                    logger.warning(f"Attempting final Vision OCR fallback for {image_path}")
-                    vision_text = self._extract_vision_text(image_path)
-                    vision_quality = self.score_ocr_quality(vision_text)
-                    attempted_methods.append("vision")
-                    return vision_text, 'fallback', vision_quality, attempted_methods
-                except Exception as vision_error:
-                    logger.error(f"Final Vision OCR fallback also failed for {image_path}: {str(vision_error)}")
-                    raise TextExtractionError(f"All OCR methods failed for {image_path}. Primary error: {str(error)}, EasyOCR fallback: {str(fallback_error)}, Vision fallback: {str(vision_error)}")
+                logger.error(f"Final Vision OCR fallback also failed for {image_path}: {str(vision_error)}")
+                raise TextExtractionError(f"All OCR methods failed for {image_path}. Primary error: {str(error)}, EasyOCR fallback: {str(fallback_error)}, Vision fallback: {str(vision_error)}")
 
     def _extract_with_comparison(self, image_path: str) -> str:
         """Extract text using both EasyOCR and OpenAI Vision for comparison"""
@@ -490,40 +477,40 @@ class OCRService(ImageProcessingInterface):
 
     def _log_comparison(self, image_path: str, easyocr_text: str, vision_text: str):
         """Log comparison between EasyOCR and OpenAI Vision results"""
-        logger.info("="*80)
-        logger.info(f"OCR COMPARISON: {image_path}")
-        logger.info("="*80)
+        logger.debug("="*80)
+        logger.debug(f"OCR COMPARISON: {image_path}")
+        logger.debug("="*80)
 
-        logger.info("-"*60)
-        logger.info("EASYOCR RESULT:")
-        logger.info("-"*60)
-        logger.info(f"Length: {len(easyocr_text)} characters")
-        logger.info(f"Text:\n{easyocr_text}")
+        logger.debug("-"*60)
+        logger.debug("EASYOCR RESULT:")
+        logger.debug("-"*60)
+        logger.debug(f"Length: {len(easyocr_text)} characters")
+        logger.debug(f"Text:\n{easyocr_text}")
 
-        logger.info("-"*60)
-        logger.info("OPENAI VISION RESULT:")
-        logger.info("-"*60)
-        logger.info(f"Length: {len(vision_text)} characters")
-        logger.info(f"Text:\n{vision_text}")
+        logger.debug("-"*60)
+        logger.debug("OPENAI VISION RESULT:")
+        logger.debug("-"*60)
+        logger.debug(f"Length: {len(vision_text)} characters")
+        logger.debug(f"Text:\n{vision_text}")
 
-        logger.info("-"*60)
-        logger.info("COMPARISON SUMMARY:")
-        logger.info("-"*60)
-        logger.info(f"EasyOCR length:  {len(easyocr_text)} chars")
-        logger.info(f"Vision length:  {len(vision_text)} chars")
-        logger.info(f"Length diff:    {len(easyocr_text) - len(vision_text)} chars")
+        logger.debug("-"*60)
+        logger.debug("COMPARISON SUMMARY:")
+        logger.debug("-"*60)
+        logger.debug(f"EasyOCR length:  {len(easyocr_text)} chars")
+        logger.debug(f"Vision length:  {len(vision_text)} chars")
+        logger.debug(f"Length diff:    {len(easyocr_text) - len(vision_text)} chars")
 
         # Calculate word overlap
         easyocr_words = set(easyocr_text.lower().split())
         vision_words = set(vision_text.lower().split())
         common_words = easyocr_words.intersection(vision_words)
 
-        logger.info(f"EasyOCR words:  {len(easyocr_words)}")
-        logger.info(f"Vision words:   {len(vision_words)}")
-        logger.info(f"Common words:   {len(common_words)}")
-        logger.info(f"Word overlap:   {len(common_words) / max(len(easyocr_words), len(vision_words)) * 100:.1f}%")
+        logger.debug(f"EasyOCR words:  {len(easyocr_words)}")
+        logger.debug(f"Vision words:   {len(vision_words)}")
+        logger.debug(f"Common words:   {len(common_words)}")
+        logger.debug(f"Word overlap:   {len(common_words) / max(len(easyocr_words), len(vision_words)) * 100:.1f}%")
 
-        logger.info("="*80)
+        logger.debug("="*80)
 
     def _preprocess_image(self, image_path: str) -> dict:
         """Preprocess image for EasyOCR"""
@@ -645,7 +632,7 @@ class OCRService(ImageProcessingInterface):
 
             # Log extraction results
             avg_confidence = np.mean(confidence_scores) if confidence_scores else 0
-            logger.info(f"Extracted {len(normalized_text)} characters from {processed['image_path']} "
+            logger.debug(f"Extracted {len(normalized_text)} characters from {processed['image_path']} "
                        f"(avg confidence: {avg_confidence:.2f})")
 
             return normalized_text
@@ -1151,221 +1138,43 @@ class OCRService(ImageProcessingInterface):
         return min(confidence, 1.0)
 
     def score_ocr_quality(self, text: str, detailed: bool = False, debug: bool = False) -> float:
-        """
-        Score OCR output quality using deterministic logic and regex patterns.
-
-        Scoring Criteria:
-        - Length of text (0-20 points)
-        - Presence of price patterns like 3.99 (0-25 points)
-        - Presence of "TOTAL" keyword (0-20 points)
-        - Ratio of valid words vs noisy tokens (0-25 points)
-        - Penalty for excessive symbols/noise (0-10 points)
+        """Score OCR output quality - delegates to domain logic.
 
         Args:
             text: OCR text to evaluate
             detailed: If True, return dict with component scores instead of just total score
-            debug: If True, print detailed scoring breakdown
+            debug: If True, log detailed scoring breakdown
 
         Returns:
             float: Quality score between 0.0 and 1.0 (if detailed=False)
             dict: Detailed scoring breakdown (if detailed=True)
         """
-        if not text or not text.strip():
-            if detailed:
-                return {
-                    'total_score': 0.0,
-                    'component_scores': {
-                        'text_length': 0.0,
-                        'price_patterns': 0.0,
-                        'total_keyword': 0.0,
-                        'word_quality': 0.0,
-                        'noise_penalty': 0.0
-                    },
-                    'raw_scores': {
-                        'text_length_points': 0.0,
-                        'price_patterns_points': 0.0,
-                        'total_keyword_points': 0.0,
-                        'word_quality_points': 0.0,
-                        'noise_penalty_points': 0.0
-                    },
-                    'max_scores': {
-                        'text_length': 20.0,
-                        'price_patterns': 25.0,
-                        'total_keyword': 20.0,
-                        'word_quality': 25.0,
-                        'noise_penalty': 10.0
-                    },
-                    'text_stats': {
-                        'length': len(text.strip()) if text else 0,
-                        'word_count': len(text.split()) if text and text.strip() else 0,
-                        'line_count': len(text.split('\n')) if text and text.strip() else 0
-                    }
-                }
-            return 0.0
+        result = score_ocr_quality(text, detailed=detailed)
 
-        # Calculate component scores
-        length_score = self._score_text_length(text)
-        price_score = self._score_price_patterns(text)
-        total_score = self._score_total_keyword(text)
-        word_quality_score = self._score_word_quality(text)
-        noise_penalty = self._calculate_noise_penalty(text)
+        # Handle debug output if requested
+        if debug and detailed:
+            logger.debug("=== OCR QUALITY SCORING DEBUG ===")
+            logger.debug(f"Text length: {len(text)} chars")
+            logger.debug(f"Length score: {result['raw_scores']['text_length_points']:.1f}/20")
+            logger.debug(f"Price patterns score: {result['raw_scores']['price_patterns_points']:.1f}/25")
+            logger.debug(f"Total keyword score: {result['raw_scores']['total_keyword_points']:.1f}/20")
+            logger.debug(f"Word quality score: {result['raw_scores']['word_quality_points']:.1f}/25")
+            logger.debug(f"Noise penalty: -{result['raw_scores']['noise_penalty_points']:.1f}/10")
+            logger.debug(f"Final score: {result['total_score']:.3f}")
+            logger.debug("================================")
 
-        # Calculate total score
-        raw_total = length_score + price_score + total_score + word_quality_score - noise_penalty
-        final_score = max(0.0, min(1.0, raw_total / 100.0))  # Normalize to 0-1
-
-        # Final guard: receipts must have prices OR total keywords
-        has_price = bool(re.search(r"\b\d+\.\d{2}\b", text))
-        words = set(re.findall(r"\b\w+\b", text.lower()))
-        has_total = any(kw in words for kw in ["total", "subtotal", "amount"])
-
-        if not has_price and not has_total:
-            final_score = min(final_score, 0.4)
-
-        # Debug output
-        if debug:
-            self._print_scoring_debug(
-                text, length_score, price_score, total_score,
-                word_quality_score, noise_penalty, final_score
-            )
-
-        # Return detailed breakdown if requested
-        if detailed:
-            return {
-                'total_score': final_score,
-                'component_scores': {
-                    'text_length': length_score / 20.0,      # Normalized to 0-1
-                    'price_patterns': price_score / 25.0,   # Normalized to 0-1
-                    'total_keyword': total_score / 20.0,    # Normalized to 0-1
-                    'word_quality': word_quality_score / 25.0,  # Normalized to 0-1
-                    'noise_penalty': noise_penalty / 10.0   # Normalized to 0-1
-                },
-                'raw_scores': {
-                    'text_length_points': length_score,
-                    'price_patterns_points': price_score,
-                    'total_keyword_points': total_score,
-                    'word_quality_points': word_quality_score,
-                    'noise_penalty_points': noise_penalty
-                },
-                'max_scores': {
-                    'text_length': 20.0,
-                    'price_patterns': 25.0,
-                    'total_keyword': 20.0,
-                    'word_quality': 25.0,
-                    'noise_penalty': 10.0
-                },
-                'text_stats': {
-                    'length': len(text.strip()),
-                    'word_count': len(text.split()),
-                    'line_count': len(text.split('\n'))
-                }
-            }
-
-        return final_score
-
-    def _score_text_length(self, text: str) -> float:
-        """Score text length (0-20 points)"""
-        return min(len(text.strip()) / 10, 20)
-
-    def _score_price_patterns(self, text: str) -> float:
-        """Score price patterns (0-25 points)"""
-        # Match standard price formats: 3.99, $4.99, etc.
-        price_patterns = r'\$?\d+\.\d{2}'
-        price_matches = len(re.findall(price_patterns, text))
-        # Match space-separated prices like "3 99" but not "123 456" sequences
-        # Only match 1-2 digits before space (typical for dollar amounts), exactly 2 digits after
-        space_prices = len(re.findall(r'(?<!\d)\d{1,2}\s+\d{2}(?!\d)', text))
-        total_matches = price_matches + (space_prices * 0.5)
-        return min(total_matches * 5, 25)
-
-    def _score_total_keyword(self, text: str) -> float:
-        """Score total keywords (0-20 points)"""
-        total_keywords = {"total", "subtotal", "amount"}
-        words = set(re.findall(r"\b\w+\b", text.lower()))
-        total_count = sum(1 for kw in total_keywords if kw in words)
-        # Boost weight: 7 points per keyword to ensure >= 0.6 with 2 keywords
-        return min(total_count * 7, 20)
-
-    def _score_word_quality(self, text: str) -> float:
-        """Score word quality (0-25 points)"""
-        words = text.split()
-        if not words:
-            return 0
-        valid_words = sum(1 for word in words if self._is_likely_valid_word(word))
-        # Penalize repetitive words (like "aaaaaaaa" or "x x x x x")
-        unique_words = len(set(words))
-        total_words = len(words)
-        # Check for repetitive patterns
-        is_repetitive = unique_words == 1 and (total_words > 5 or (total_words == 1 and len(words[0]) > 10))
-        if is_repetitive:
-            return 5  # Low score for repetitive text
-        return (valid_words / total_words * 25)
-
-    def _calculate_noise_penalty(self, text: str) -> float:
-        """Calculate noise penalty (0-10 points)"""
-        noise_chars = len(re.findall(r'[^\w\s$.,%\-:\/\n]', text))
-        text_len = len(text.strip())
-        noise_ratio = noise_chars / text_len if text_len > 0 else 0
-        # Increase noise penalty threshold
-        if noise_ratio > 0.3:
-            return 4.0  # 0.4 normalized = 4.0 points
-        return 0.0
-
-    def _is_likely_valid_word(self, word: str) -> bool:
-        """Simple heuristic to check if a word is likely valid"""
-        # This is a simplified check - in practice, you might use a dictionary
-        # or more sophisticated language model
-        return len(word) > 1 and not word.isdigit()
-
-    def _print_scoring_debug(self, text: str, length_score: float, price_score: float,
-                           total_score: float, word_quality_score: float,
-                           noise_penalty: float, final_score: float):
-        """Print detailed scoring breakdown for debugging"""
-        logger.debug("=== OCR QUALITY SCORING DEBUG ===")
-        logger.debug(f"Text length: {len(text)} chars")
-        logger.debug(f"Length score: {length_score:.1f}/20")
-        logger.debug(f"Price patterns score: {price_score:.1f}/25")
-        logger.debug(f"Total keyword score: {total_score:.1f}/20")
-        logger.debug(f"Word quality score: {word_quality_score:.1f}/25")
-        logger.debug(f"Noise penalty: -{noise_penalty:.1f}/10")
-        logger.debug(f"Raw total: {length_score + price_score + total_score + word_quality_score - noise_penalty:.1f}/100")
-        logger.debug(f"Final score: {final_score:.3f}")
-        logger.debug("================================")
+        return result
 
     def should_fallback(self, text: str, threshold: float) -> bool:
-        """Determine if OCR quality is below threshold and fallback is needed"""
-        quality_score = self.score_ocr_quality(text)
-        return quality_score < threshold
+        """Determine if OCR quality is below threshold and fallback is needed.
+
+        Delegates to domain logic for quality assessment.
+        """
+        return should_fallback(text, threshold)
 
     def get_fallback_reasoning(self, text: str, threshold: float) -> Dict[str, Any]:
-        """Get detailed reasoning for fallback decision"""
-        quality_score = self.score_ocr_quality(text, detailed=True)
+        """Get detailed reasoning for fallback decision.
 
-        # Determine reasoning
-        reasoning_parts = []
-
-        if quality_score['component_scores']['text_length'] < 0.5:
-            reasoning_parts.append(f"Text too short ({len(text)} chars)")
-
-        if quality_score['component_scores']['price_patterns'] < 0.6:
-            reasoning_parts.append("Insufficient price patterns detected")
-
-        if quality_score['component_scores']['total_keyword'] < 0.5:
-            reasoning_parts.append("Missing TOTAL/AMOUNT keywords")
-
-        if quality_score['component_scores']['word_quality'] < 0.6:
-            reasoning_parts.append("Low word quality (many noisy tokens)")
-
-        if quality_score['component_scores']['noise_penalty'] > 0.5:
-            reasoning_parts.append("Excessive special characters/noise")
-
-        reasoning = "; ".join(reasoning_parts) if reasoning_parts else "General quality concerns"
-
-        return {
-            'should_fallback': quality_score['total_score'] < threshold,
-            'quality_score': quality_score['total_score'],
-            'threshold': threshold,
-            'reasoning': reasoning,
-            'component_scores': quality_score['component_scores'],
-            'recommendation': 'FALLBACK' if quality_score['total_score'] < threshold else 'PROCEED'
-        }
+        Delegates to domain logic for quality assessment and reasoning.
+        """
+        return get_fallback_reasoning(text, threshold)

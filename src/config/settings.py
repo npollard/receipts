@@ -14,7 +14,7 @@ IS_TEST = ENVIRONMENT == "test" or "pytest" in os.getenv("PYTEST_CURRENT_TEST", 
 # Database Configuration
 class DatabaseConfig:
     """Database settings based on environment"""
-    
+
     @property
     def database_url(self) -> str:
         """Get database URL based on environment"""
@@ -22,13 +22,13 @@ class DatabaseConfig:
         explicit_url = os.getenv("DATABASE_URL")
         if explicit_url:
             return explicit_url
-        
+
         # Use environment-specific database
         if IS_TEST:
             return f"sqlite:///{BASE_DIR}/test_receipts.db"
         else:
             return f"sqlite:///{BASE_DIR}/receipts.db"
-    
+
     @property
     def database_path(self) -> Path:
         """Get database file path"""
@@ -39,7 +39,7 @@ class DatabaseConfig:
         else:
             # Non-SQLite databases don't have file paths
             return Path()
-    
+
     @property
     def database_name(self) -> str:
         """Get database name for logging"""
@@ -52,35 +52,31 @@ class DatabaseConfig:
 # Application Configuration
 class AppConfig:
     """General application settings"""
-    
+
     # Environment
     ENVIRONMENT = ENVIRONMENT
     IS_TEST = IS_TEST
     IS_DEVELOPMENT = ENVIRONMENT == "development"
     IS_PRODUCTION = ENVIRONMENT == "production"
-    
+
     # Paths
     BASE_DIR = BASE_DIR
     IMAGES_DIR = BASE_DIR / "imgs"
-    
+
     # Database
     database = DatabaseConfig()
-    
+
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO" if IS_PRODUCTION else "DEBUG")
     LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    
+
     # API Settings
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    
+
     # Processing Settings
     DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "user@receipts.local")
-    MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
-    
-    # Token Usage
-    TOKEN_USAGE_FILE = os.getenv("TOKEN_USAGE_FILE", "token_usage.json")
-    
+
     @classmethod
     def get_environment_summary(cls) -> str:
         """Get summary of current environment"""

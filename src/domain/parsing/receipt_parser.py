@@ -16,7 +16,10 @@ from api_response import APIResponse
 from tracking import TokenUsage, extract_token_usage
 from domain.validation.validation_service import ValidationService
 from domain.validation.validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
-from services.retry_service import RetryService, RetryStrategy
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.retry_service import RetryService
 from core.logging import get_parser_logger
 from core.exceptions import (
     ParsingError, ValidationError as CustomValidationError,
@@ -45,14 +48,15 @@ class ReceiptParser(ReceiptParsingInterface):
     """Unified receipt parser with LLM-based parsing and retry logic"""
 
     def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.0,
-                 ocr_service: ImageProcessingInterface = None):
+                 ocr_service: ImageProcessingInterface = None,
+                 retry_service: 'RetryService' = None):
         self.llm = ChatOpenAI(
             model=model_name,
             temperature=temperature,
             api_key=os.environ.get("OPENAI_API_KEY")
         )
         self.validation_service = ValidationService()
-        self.retry_service = RetryService()
+        self.retry_service = retry_service  # Injected, for retry orchestration
         self.token_usage = TokenUsage()
         self.ocr_service = ocr_service  # Injected, for OCR fallback retry
         self.current_retries = []  # Track retry strategies used
@@ -126,7 +130,7 @@ Expected JSON format:
 
     def _llm_self_correction_retry(self, original_text: str, previous_result: dict, error_info: dict) -> ParsingResult:
         """Implement LLM self-correction retry strategy"""
-        logger.info(f"Attempting LLM self-correction retry for {error_info['severity']} error")
+        logger.debug(f"Attempting LLM self-correction retry for {error_info['severity']} error")
         self.current_retries.append("LLM_SELF_CORRECTION")
 
         result = ParsingResult()
@@ -171,7 +175,7 @@ Expected JSON format:
                 result.error = f"Self-correction validation failed: {validated_response.error}"
                 return result
 
-            logger.info("LLM self-correction retry successful")
+            logger.debug("LLM self-correction retry successful")
             result.parsed = validated_response.data
             result.valid = True
             result.error = None
@@ -184,7 +188,7 @@ Expected JSON format:
 
     def _rag_retry_with_focused_context(self, original_text: str, error_info: dict) -> ParsingResult:
         """Implement RAG retry with focused context extraction"""
-        logger.info(f"Attempting RAG retry with focused context for {error_info['severity']} error")
+        logger.debug(f"Attempting RAG retry with focused context for {error_info['severity']} error")
         self.current_retries.append("RAG_FOCUSED_CONTEXT")
 
         result = ParsingResult()
@@ -250,7 +254,7 @@ Expected JSON format:
                 result.error = f"RAG validation failed: {validated_response.error}"
                 return result
 
-            logger.info("RAG retry successful")
+            logger.debug("RAG retry successful")
             result.parsed = validated_response.data
             result.valid = True
             result.error = None
@@ -269,7 +273,7 @@ Expected JSON format:
             result.error = "OCR service not available for fallback"
             return result
 
-        logger.info(f"Attempting OCR fallback retry for {error_info['severity']} error")
+        logger.debug(f"Attempting OCR fallback retry for {error_info['severity']} error")
         self.current_retries.append("OCR_FALLBACK")
 
         try:
@@ -280,7 +284,7 @@ Expected JSON format:
                 result.error = "OCR fallback returned empty text"
                 return result
 
-            logger.info(f"OCR fallback extracted {len(fallback_text)} characters")
+            logger.debug(f"OCR fallback extracted {len(fallback_text)} characters")
 
             # Use template for Vision reparse prompt
             vision_prompt = get_vision_reparse_prompt(fallback_text)
@@ -318,7 +322,7 @@ Expected JSON format:
                 result.error = f"OCR fallback validation failed: {validated_response.error}"
                 return result
 
-            logger.info("OCR fallback retry successful")
+            logger.debug("OCR fallback retry successful")
             result.parsed = validated_response.data
             result.valid = True
             result.error = None
@@ -346,7 +350,7 @@ Expected JSON format:
         self.current_retries = []
 
         # First attempt: normal parsing
-        logger.info("Starting validation-driven retry parsing")
+        logger.debug("Starting validation-driven retry parsing")
 
         try:
             # First attempt
@@ -364,23 +368,23 @@ Expected JSON format:
 
             # If first attempt is successful, return immediately
             if first_result.valid:
-                logger.info("Parsing successful on first attempt")
+                logger.debug("Parsing successful on first attempt")
                 first_result.token_usage = accumulated_token_usage
                 return first_result
 
             # First attempt failed validation, classify error for retry
             error_info = self._classify_validation_error(first_result.error or "Validation failed")
-            logger.info(f"Validation error classified: {error_info}")
+            logger.debug(f"Validation error classified: {error_info}")
 
             retry_count = 1
 
             # Retry Strategy 1: LLM Self-Correction (for small/medium errors)
             if retry_count <= max_retries and error_info['severity'] in ['small', 'medium']:
-                logger.info(f"Retry {retry_count}/{max_retries}: LLM self-correction")
+                logger.debug(f"Retry {retry_count}/{max_retries}: LLM self-correction")
                 if first_result.parsed:
                     retry_result = self._llm_self_correction_retry(
                         ocr_text,
-                        first_result.parsed.__dict__ if hasattr(first_result.parsed, '__dict__') else first_result.parsed,
+                        first_result.parsed.model_dump(),
                         error_info
                     )
                 else:
@@ -406,7 +410,7 @@ Expected JSON format:
                     best_attempt = retry_result
 
                 if retry_result.valid:
-                    logger.info(f"LLM self-correction successful on retry {retry_count}")
+                    logger.debug(f"LLM self-correction successful on retry {retry_count}")
                     retry_result.token_usage = accumulated_token_usage
                     return retry_result
                 else:
@@ -415,7 +419,7 @@ Expected JSON format:
 
             # Retry Strategy 2: RAG with Focused Context (for medium/large errors)
             if retry_count <= max_retries and error_info['severity'] in ['medium', 'large']:
-                logger.info(f"Retry {retry_count}/{max_retries}: RAG with focused context")
+                logger.debug(f"Retry {retry_count}/{max_retries}: RAG with focused context")
                 retry_result = self._rag_retry_with_focused_context(ocr_text, error_info)
 
                 # Accumulate token usage from retry
@@ -429,7 +433,7 @@ Expected JSON format:
                     best_attempt = retry_result
 
                 if retry_result.valid:
-                    logger.info(f"RAG retry successful on retry {retry_count}")
+                    logger.debug(f"RAG retry successful on retry {retry_count}")
                     retry_result.token_usage = accumulated_token_usage
                     return retry_result
                 else:
@@ -443,7 +447,7 @@ Expected JSON format:
                 low_quality = ocr_quality < 0.25
 
                 if low_quality or error_info['severity'] in ['medium', 'large']:
-                    logger.info(f"Retry {retry_count}/{max_retries}: OCR fallback (quality: {ocr_quality:.3f})")
+                    logger.debug(f"Retry {retry_count}/{max_retries}: OCR fallback (quality: {ocr_quality:.3f})")
                     retry_result = self._ocr_fallback_retry(image_path, error_info)
 
                     # Accumulate token usage from retry
@@ -457,7 +461,7 @@ Expected JSON format:
                         best_attempt = retry_result
 
                     if retry_result.valid:
-                        logger.info(f"OCR fallback successful on retry {retry_count}")
+                        logger.debug(f"OCR fallback successful on retry {retry_count}")
                         retry_result.token_usage = accumulated_token_usage
                         return retry_result
                     else:
@@ -618,13 +622,16 @@ Remember: Return ONLY: JSON object, nothing else.
         def fix_prompt_generator(original_text, error, attempt):
             return self._create_fix_prompt(original_text, str(error), attempt)
 
-        # Use retry service with error fixing
-        return self.retry_service.execute_with_retry_and_fix(
-            parse_attempt,
-            fix_prompt_generator,
-            text,
-            error_types=(Exception,)
-        )
+        # Use retry service with error fixing if injected, otherwise direct execution
+        if self.retry_service:
+            return self.retry_service.execute_with_retry_and_fix(
+                parse_attempt,
+                fix_prompt_generator,
+                text,
+                error_types=(Exception,)
+            )
+        else:
+            return self.parse_text(text)
 
     def parse_with_usage_tracking(self, text: str, token_usage=None) -> APIResponse:
         """Parse text with token usage tracking"""

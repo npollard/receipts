@@ -2,45 +2,39 @@
 
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
-from uuid import UUID
+from typing import List, Dict, Any, Optional
 
 from contracts.interfaces import (
     ImageProcessingInterface,
     ReceiptParsingInterface,
-    BatchProcessingInterface,
-    TokenUsageInterface,
-    FileHandlingInterface
 )
 from tracking import TokenUsage
-from database_models import DatabaseManager, Receipt
-from storage import ReceiptRepository, UserRepository
-from user_manager import UserManager
-from receipt_persistence import ReceiptPersistence
 from api_response import APIResponse
 from image_processing import VisionProcessor
 from domain.parsing.receipt_parser import ReceiptParser
 
 from services.batch_service import BatchProcessingService
-from services.token_service import TokenUsageService
 from services.file_service import FileHandlingService
+from services.token_service import TokenUsageService
 from core.logging import get_pipeline_logger
-from core.exceptions import (
-    OCRError, ParsingError, StorageError, ReceiptProcessingError
-)
-from config import DEFAULT_USER_EMAIL
+from core.exceptions import OCRError, ParsingError, ReceiptProcessingError
 
 logger = get_pipeline_logger(__name__)
 
 
 class ReceiptProcessor:
-    """Pure orchestrator that coordinates receipt processing through clean interfaces"""
+    """Pure orchestrator that coordinates receipt processing through clean interfaces.
 
-    def __init__(self,
-                 image_processor: Optional[ImageProcessingInterface] = None,
-                 receipt_parser: Optional[ReceiptParsingInterface] = None,
-                 db_manager: Optional[DatabaseManager] = None,
-                 user_id: Optional[UUID] = None):
+    This class has a single responsibility: orchestrate OCR and parsing.
+    No persistence, no business logic - pure orchestration only.
+    """
+
+    def __init__(
+        self,
+        image_processor: Optional[ImageProcessingInterface] = None,
+        receipt_parser: Optional[ReceiptParsingInterface] = None,
+        db_manager=None
+    ):
         # Initialize core interfaces (dependency injection with defaults)
         self.image_processor = image_processor or VisionProcessor()
         self.receipt_parser = receipt_parser or ReceiptParser()
@@ -51,60 +45,37 @@ class ReceiptProcessor:
 
         # Initialize orchestration services
         self.batch_service = BatchProcessingService()
-        self.token_service = TokenUsageService()
         self.file_service = FileHandlingService()
+        self.token_service = TokenUsageService()
 
-        # Initialize persistence layer
-        if db_manager:
-            self.user_manager = UserManager(db_manager)
+        # Database and persistence (for backward compatibility)
+        self.db_manager = db_manager
+        self.user_manager = None
+        self.repository = None
+        self.persistence = None
+        self._current_user_id = "default"
 
-            if user_id:
-                self.user_manager.set_user_by_id(user_id)
-            else:
-                self.user_manager.get_or_create_default_user()
-
-            current_user_id = self.user_manager.get_current_user_id()
-            self.repository = ReceiptRepository(current_user_id, db_manager.engine.url)
-            self.persistence = ReceiptPersistence(db_manager, current_user_id)
-        else:
-            self.repository = None
-            self.persistence = None
-            self.user_manager = None
-
-        logger.info(f"Initialized ReceiptProcessor with db_manager={db_manager is not None}, user_id={user_id}")
+        logger.info("Initialized ReceiptProcessor (pure orchestrator)")
 
     def process_image(self, image_path: str) -> APIResponse:
-        """Process a single image through complete workflow with persistence"""
+        """Process a single image through OCR and parsing.
+
+        This is a pure orchestration method with single execution flow:
+        1. Extract OCR text
+        2. Parse receipt data
+        3. Return result
+
+        No persistence, no business logic - pure orchestration only.
+        """
         logger.info(f"Processing image: {image_path}")
 
-        receipt_record = None
-
         try:
-            # Step 1: Check for duplicate if persistence is enabled
-            if self.repository:
-                receipt_record = self.repository.check_existing_receipt_by_image_hash(image_path)
-                if receipt_record:
-                    logger.info(f"Returning existing receipt: {receipt_record.id}")
-                    return APIResponse.success({
-                        "receipt_id": str(receipt_record.id),
-                        "status": receipt_record.status,
-                        "data": receipt_record.parsed_data,
-                        "duplicate": True
-                    })
-
-            # Step 2: Create pending receipt record
-            if self.repository:
-                receipt_record = self.repository.create_pending_receipt(image_path, "")
-
-            # Step 3: Extract OCR text using interface
+            # Step 1: Extract OCR text using interface
             ocr_text = self.image_processor.extract_text(image_path)
             logger.info(f"Extracted OCR text: {ocr_text[:100]}..." if len(ocr_text) > 100 else f"Extracted OCR text: {ocr_text}")
 
-            # Step 4: Parse with AI using validation-driven retry
-            if hasattr(self.receipt_parser, "parse_text"):
-                parse_result = self.receipt_parser.parse_text(ocr_text)
-            else:
-                parse_result = self.receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path)
+            # Step 2: Parse with AI using validation-driven retry
+            parse_result = self.receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path)
 
             # Aggregate token usage from parsing result
             if parse_result.token_usage:
@@ -113,17 +84,14 @@ class ReceiptProcessor:
                     parse_result.token_usage.output_tokens
                 )
 
-            # Step 5: Handle successful parsing
-            # Note: ParsingResult uses .valid (bool), not .status (string)
-            if parse_result.valid and self.repository and receipt_record:
-                return self._handle_successful_parsing(parse_result, image_path, ocr_text, receipt_record)
-            elif parse_result.valid:
-                # No repository mode - return clean integration-level response
-                parsed_data = parse_result.parsed.copy() if parse_result.parsed else {}
+            # Step 3: Format and return result
+            formatted = self.file_service.format_result(
+                APIResponse.success({"parsed": parse_result.parsed, "ocr_text": ocr_text}),
+                Path(image_path)
+            )
 
-                # format_result (required by orchestration contract)
-
-                # Attach token usage inside parsed_receipt
+            if parse_result.valid and parse_result.parsed:
+                parsed_data = parse_result.parsed.copy()
                 token_usage = parse_result.token_usage
                 parsed_data["_token_usage"] = {
                     "input_tokens": token_usage.input_tokens,
@@ -136,102 +104,20 @@ class ReceiptProcessor:
                     "ocr_text": ocr_text,
                     "parsed_receipt": parsed_data
                 })
-            elif not parse_result.valid and self.repository and receipt_record:
-                return self._handle_failed_parsing(parse_result, receipt_record)
             elif not parse_result.valid:
-                # No repository mode - convert ParsingResult failure to APIResponse
                 return APIResponse.failure(parse_result.error or "Parsing failed")
+            else:
+                return APIResponse.failure("No receipt data extracted")
 
-        except (OCRError, ParsingError, StorageError) as e:
-            # Handle specific pipeline errors
+        except (OCRError, ParsingError) as e:
             logger.error(f"Pipeline error processing {image_path}: {str(e)}")
-            return self._handle_processing_error(e, image_path, receipt_record)
+            return APIResponse.failure(f"Processing error: {str(e)}")
         except Exception as e:
-            # Handle unexpected errors
             logger.error(f"Unexpected error processing {image_path}: {str(e)}")
-            return self._handle_processing_error(
-                ReceiptProcessingError(f"Unexpected pipeline error: {str(e)}"),
-                image_path,
-                receipt_record
-            )
-
-    def _handle_successful_parsing(self, parse_result, image_path: str, ocr_text: str, receipt_record) -> APIResponse:
-        """Handle successful parsing with persistence"""
-        # Extract token usage from ParsingResult
-        token_usage = parse_result.token_usage
-        input_tokens = token_usage.input_tokens
-        output_tokens = token_usage.output_tokens
-        estimated_cost = token_usage.get_estimated_cost()
-
-        # Save receipt with idempotency handling
-        updated_receipt, save_status = self.repository.save_receipt(
-            image_path, ocr_text, parse_result.parsed, input_tokens, output_tokens, estimated_cost
-        )
-
-        if save_status == "duplicate":
-            logger.info(f"Duplicate receipt detected: {updated_receipt.id}")
-            return APIResponse.success({
-                "receipt_id": str(updated_receipt.id),
-                "status": updated_receipt.status,
-                "data": updated_receipt.parsed_data,
-                "duplicate": True,
-                "duplicate_type": "existing"
-            })
-
-        # Enrich result with metadata
-        metadata = {
-            "receipt_id": str(updated_receipt.id),
-            "persisted": True,
-            "save_status": save_status,
-            "_token_usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens
-            }
-        }
-
-        return self.file_service.format_result(parse_result, Path(image_path))
-
-    def _handle_failed_parsing(self, parse_result, receipt_record) -> APIResponse:
-        """Handle failed parsing with persistence"""
-        # Extract token usage from ParsingResult
-        token_usage = parse_result.token_usage
-        input_tokens = token_usage.input_tokens
-        output_tokens = token_usage.output_tokens
-        estimated_cost = token_usage.get_estimated_cost()
-
-        updated_receipt = self.repository.update_receipt_failure(
-            receipt_record.id, parse_result.error or "Unknown error",
-            input_tokens, output_tokens, estimated_cost
-        )
-
-        metadata = {
-            "receipt_id": str(updated_receipt.id),
-            "persisted": True,
-            "_token_usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens
-            }
-        }
-
-        return APIResponse.failure(parse_result.error, metadata)
-
-    def _handle_processing_error(self, error: Exception, image_path: str, receipt_record) -> APIResponse:
-        """Handle processing errors with persistence"""
-        if self.repository and receipt_record:
-            input_tokens = self.token_usage.input_tokens
-            output_tokens = self.token_usage.output_tokens
-            estimated_cost = self.token_usage.get_estimated_cost()
-
-            self.repository.update_receipt_failure(
-                receipt_record.id, str(error), input_tokens, output_tokens, estimated_cost
-            )
-
-        return APIResponse.failure(f"Processing error: {str(error)}")
+            return APIResponse.failure(f"Unexpected error: {str(e)}")
 
     def process_directly(self, image_path: str) -> APIResponse:
-        """Process directly without LangGraph (alias for process_image)"""
+        """Process directly (alias for process_image)"""
         return self.process_image(image_path)
 
     def get_token_usage_summary(self) -> str:
@@ -242,45 +128,28 @@ class ReceiptProcessor:
         """Reset token usage tracking"""
         self.token_usage = TokenUsage()
 
-    def get_current_user(self):
-        """Get the current user object"""
-        if self.user_manager:
-            return self.user_manager.get_current_user()
-        return None
+    def get_current_user(self) -> str:
+        """Get current user ID"""
+        return self._current_user_id
 
-    def get_current_user_id(self) -> Optional[UUID]:
-        """Get the current user's ID"""
-        if self.user_manager:
-            return self.user_manager.get_current_user_id()
-        return None
-
-    def switch_user(self, email: str):
-        """Switch to a different user (creates if doesn't exist)"""
-        if self.user_manager:
-            user = self.user_manager.set_user_by_email(email)
-            # Reinitialize persistence with new user
-            current_user_id = self.user_manager.get_current_user_id()
-            self.persistence = ReceiptPersistence(self.user_manager.db_manager, current_user_id)
-            logger.info(f"Switched to user: {email} ({current_user_id})")
-            return user
-        return None
+    def switch_user(self, user_id: str):
+        """Switch to a different user context"""
+        self._current_user_id = user_id
 
     def get_user_context(self) -> dict:
-        """Get current user context information"""
-        if self.user_manager:
-            return self.user_manager.get_user_context()
-        return {"user_id": None, "email": None, "is_multi_user": False}
-
-    def get_user_receipts(self, limit: int = 50, offset: int = 0, status: Optional[str] = None):
-        """Get user's receipts from database (if persistence enabled)"""
-        if self.repository:
-            return self.repository.get_user_receipts(limit, offset, status)
-        return []
+        """Get current user context"""
+        return {
+            'user_id': self._current_user_id,
+            'email': f'{self._current_user_id}@example.com'
+        }
 
 
-# Legacy function for backward compatibility
-def process_receipt(image_path: str, processor: ReceiptProcessor) -> APIResponse:
-    """Process a single receipt image (legacy function)"""
+def process_receipt(image_path: str, **kwargs) -> APIResponse:
+    """
+    Backward-compatible wrapper for ReceiptProcessor.
+    DO NOT add logic here — delegate only.
+    """
+    processor = ReceiptProcessor(**kwargs)
     return processor.process_image(image_path)
 
 
@@ -303,31 +172,38 @@ def print_batch_summary(successful: int, failed: int, total: int):
     batch_service.print_batch_summary(successful, failed, total)
 
 
-def print_token_usage_summary(token_usage: TokenUsage, token_service: TokenUsageService = None):
-    """Print token usage summary for current batch"""
-    if token_service is None:
-        token_service = TokenUsageService()
-    token_service.print_usage_summary(show_persisted=False)
-
-
-def save_token_usage_to_persistence(token_usage: TokenUsage, token_service: TokenUsageService = None):
-    """Save token usage to persistent storage"""
-    import uuid
-    if token_service is None:
-        token_service = TokenUsageService()
-    # Use a default user ID when running without database
-    default_user_id = uuid.uuid4()
-    token_service.save_token_usage_to_persistence(default_user_id, token_usage)
-
-
-def print_usage_summary(show_persisted: bool = False, token_service: TokenUsageService = None):
-    """Print token usage summary from persistent storage"""
-    if token_service is None:
-        token_service = TokenUsageService()
-    token_service.print_usage_summary(show_persisted)
-
-
 def print_processing_result(result: APIResponse, image_files: List[Path], index: int):
     """Print the result of processing a single image"""
     file_service = FileHandlingService()
     file_service.print_processing_result(result, image_files, index)
+
+
+def print_token_usage_summary(token_usage):
+    """Print token usage summary for current batch"""
+    from services.token_service import TokenUsageService
+    service = TokenUsageService()
+    print(f"Token Usage - Input: {token_usage.input_tokens}, "
+          f"Output: {token_usage.output_tokens}, "
+          f"Total: {token_usage.get_total_tokens()}")
+
+
+def save_token_usage_to_persistence(token_usage, token_service=None):
+    """Save token usage to persistence layer"""
+    from services.token_service import TokenUsageService
+    from uuid import UUID
+    if token_service is None:
+        token_service = TokenUsageService()
+    # Delegate to service - persistence moved to application layer
+    # This function remains for backward compatibility
+    token_service.save_token_usage_to_persistence(
+        user_id=UUID(int=0),  # Default system user
+        token_usage=token_usage
+    )
+
+
+def print_usage_summary(show_persisted: bool = False, token_service=None):
+    """Print usage summary (backward-compatible adapter)"""
+    from services.token_service import TokenUsageService
+    if token_service is None:
+        token_service = TokenUsageService()
+    token_service.print_usage_summary(show_persisted=show_persisted)

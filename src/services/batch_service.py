@@ -25,9 +25,11 @@ from contracts.interfaces import (
 )
 from tracking import TokenUsage
 from api_response import APIResponse
+from shared.models.processing_result import ProcessingResult
 from core.file_operations import get_image_files
 from core.logging import get_batch_logger
 from utils.output_formatter import format_receipt_result
+from domain.validation import has_meaningful_receipt_data
 from config import get_runtime_config, RuntimeConfig
 
 # Reduce logging noise - set specific loggers to WARNING level
@@ -36,26 +38,6 @@ logging.getLogger('domain.validation.validation_service').setLevel(logging.WARNI
 logging.getLogger('services.retry_service').setLevel(logging.WARNING)
 
 logger = get_batch_logger(__name__)
-
-
-@dataclass
-class ProcessingResult:
-    """Result from processing a single image"""
-    image_path: str
-    success: bool
-    parsed_data: Dict[str, Any]
-    retries: List[str]
-    validation_error: Optional[str]
-    token_usage: TokenUsage
-    processing_time_ms: float
-    ocr_method: str = "unknown"
-    ocr_duration_ms: float = 0.0
-    ocr_attempted_methods: List[str] = None
-    ocr_quality_score: float = 0.0
-
-    def __post_init__(self):
-        if self.ocr_attempted_methods is None:
-            self.ocr_attempted_methods = []
 
 
 @dataclass
@@ -81,108 +63,139 @@ class BatchObservability:
         }
 
 
-def _process_single_image_worker(
-    image_path_str: str,
+def _set_worker_thread_limits(ocr_threads: int) -> None:
+    """Configure thread limits for multiprocessing workers."""
+    import os
+    os.environ['OMP_NUM_THREADS'] = str(ocr_threads)
+    os.environ['OPENBLAS_NUM_THREADS'] = str(ocr_threads)
+    os.environ['MKL_NUM_THREADS'] = str(ocr_threads)
+    os.environ['VECLIB_MAXIMUM_THREADS'] = str(ocr_threads)
+    os.environ['NUMEXPR_NUM_THREADS'] = str(ocr_threads)
+    os.environ['TORCH_NUM_THREADS'] = str(ocr_threads)
+
+
+def _create_processing_services():
+    """Create fresh service instances for isolated worker processes."""
+    from image_processing import VisionProcessor
+    from domain.parsing.receipt_parser import ReceiptParser
+
+    image_processor = VisionProcessor()
+    ocr_service = image_processor.ocr_service
+    receipt_parser = ReceiptParser(ocr_service=ocr_service)
+    return image_processor, ocr_service, receipt_parser
+
+
+def _extract_ocr_data(image_processor, image_path: str):
+    """Extract OCR text and timing data."""
+    import time
+    ocr_start = time.time()
+    ocr_text = image_processor.extract_text(image_path)
+    ocr_duration_ms = (time.time() - ocr_start) * 1000
+    return ocr_text, ocr_duration_ms
+
+
+def _get_observability_data(ocr_service) -> dict:
+    """Extract observability data from OCR service."""
+    ocr_obs = getattr(ocr_service, '_last_observability', None)
+    return {
+        'method': ocr_obs.method if ocr_obs else 'easyocr',
+        'attempted_methods': ocr_obs.attempted_methods if ocr_obs else ['easyocr'],
+        'quality_score': ocr_obs.quality_score if ocr_obs else 0.0,
+    }
+
+
+def _convert_parsed_data(result):
+    """Convert parsing result to dict format."""
+    if result.parsed is None:
+        return {}
+    if isinstance(result.parsed, dict):
+        return result.parsed
+    return result.parsed.model_dump()
+
+
+
+
+def _build_processing_result(
+    image_path: str,
+    parsed_data: dict,
+    parse_result,
+    receipt_parser,
+    ocr_data: dict,
+    processing_time_ms: float,
+    success: bool
+) -> ProcessingResult:
+    """Build ProcessingResult from extracted data - single source of truth."""
+    from tracking import TokenUsage
+
+    return ProcessingResult(
+        image_path=image_path,
+        success=success,
+        parsed_data=parsed_data,
+        retries=receipt_parser.get_current_retries(),
+        validation_error=parse_result.error if parse_result.error else None,
+        token_usage=parse_result.token_usage if parse_result.token_usage else TokenUsage(),
+        processing_time_ms=processing_time_ms,
+        ocr_method=ocr_data['method'],
+        ocr_duration_ms=ocr_data['duration_ms'],
+        ocr_attempted_methods=ocr_data['attempted_methods'],
+        ocr_quality_score=ocr_data['quality_score'],
+    )
+
+
+def _build_error_result(image_path: str, error: Optional[Exception] = None, processing_time_ms: float = 0.0) -> ProcessingResult:
+    """Build ProcessingResult for failed processing - single source of truth."""
+    from tracking import TokenUsage
+
+    return ProcessingResult(
+        image_path=image_path,
+        success=False,
+        parsed_data={},
+        retries=[],
+        validation_error=str(error) if error else "Processing failed",
+        token_usage=TokenUsage(),
+        processing_time_ms=processing_time_ms,
+        ocr_method="error",
+        ocr_duration_ms=0.0,
+        ocr_attempted_methods=[],
+        ocr_quality_score=0.0,
+    )
+
+
+def process_single_image(
+    image_path: str,
     execution_mode: str,
     max_workers: int,
     ocr_threads: int,
 ) -> ProcessingResult:
-    """Worker function to process a single image in a separate process
-
-    This function creates its own service instances to avoid sharing
-    stateful objects across processes.
-
-    Args:
-        image_path_str: Path to the image file
-        execution_mode: Runtime execution mode
-        max_workers: Number of workers (for logging)
-        ocr_threads: Number of OCR threads (must be 1 when parallel)
-    """
-    import os
-    import sys
+    """Process a single image with fresh service instances (worker process entry point)."""
     import time
+    import logging
 
-    # Ensure thread limits are set in worker process
-    os.environ["OMP_NUM_THREADS"] = str(ocr_threads)
-    os.environ["MKL_NUM_THREADS"] = str(ocr_threads)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(ocr_threads)
-
+    logger = logging.getLogger(__name__)
     start_time = time.time()
 
+    _set_worker_thread_limits(ocr_threads)
+
     try:
-        # Import here to ensure thread limits are set first
-        from image_processing import VisionProcessor
-        from domain.parsing.receipt_parser import ReceiptParser
+        image_processor, ocr_service, receipt_parser = _create_processing_services()
+        ocr_text, ocr_duration_ms = _extract_ocr_data(image_processor, image_path)
+        obs_data = _get_observability_data(ocr_service)
+        obs_data['duration_ms'] = ocr_duration_ms
 
-        # Create fresh service instances (no shared state)
-        image_processor = VisionProcessor()
-        ocr_service = image_processor.ocr_service
-        receipt_parser = ReceiptParser(ocr_service=ocr_service)
+        parse_result = receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path)
+        parsed_data = _convert_parsed_data(parse_result)
+        has_data = has_meaningful_receipt_data(parsed_data) if parse_result.valid else False
 
-        # Extract text with timing
-        ocr_start = time.time()
-        ocr_text = image_processor.extract_text(image_path_str)
-        ocr_duration = (time.time() - ocr_start) * 1000
-
-        # Get OCR observability data (stored on ocr_service during extraction)
-        ocr_obs = getattr(ocr_service, '_last_observability', None)
-        ocr_method = ocr_obs.method if ocr_obs else 'easyocr'
-        ocr_attempted_methods = ocr_obs.attempted_methods if ocr_obs else ['easyocr']
-        ocr_quality_score = ocr_obs.quality_score if ocr_obs else 0.0
-
-        # Parse receipt
-        result = receipt_parser.parse_with_validation_driven_retry(ocr_text, image_path_str)
-
-        # Determine success
-        if result.parsed is None:
-            parsed_data = {}
-        elif hasattr(result.parsed, '__dict__'):
-            parsed_data = result.parsed.__dict__
-        elif isinstance(result.parsed, dict):
-            parsed_data = result.parsed
-        else:
-            parsed_data = {}
-
-        has_meaningful_data = (
-            result.valid and
-            parsed_data and
-            parsed_data.get('items') and
-            len(parsed_data.get('items', [])) > 0 and
-            parsed_data.get('total') is not None
-        )
-
-        processing_time = (time.time() - start_time) * 1000
-
-        return ProcessingResult(
-            image_path=image_path_str,
-            success=has_meaningful_data,
-            parsed_data=parsed_data,
-            retries=receipt_parser.get_current_retries() if hasattr(receipt_parser, 'get_current_retries') else [],
-            validation_error=result.error if result.error else None,
-            token_usage=result.token_usage if result.token_usage else TokenUsage(),
-            processing_time_ms=processing_time,
-            ocr_method=ocr_method,
-            ocr_duration_ms=ocr_duration,
-            ocr_attempted_methods=ocr_attempted_methods,
-            ocr_quality_score=ocr_quality_score,
+        processing_time_ms = (time.time() - start_time) * 1000
+        return _build_processing_result(
+            image_path, parsed_data, parse_result, receipt_parser,
+            obs_data, processing_time_ms, success=has_data
         )
 
     except Exception as e:
-        processing_time = (time.time() - start_time) * 1000
-        logger.error(f"Error processing {image_path_str}: {e}")
-        return ProcessingResult(
-            image_path=image_path_str,
-            success=False,
-            parsed_data={},
-            retries=[],
-            validation_error=str(e),
-            token_usage=TokenUsage(),
-            processing_time_ms=processing_time,
-            ocr_method="error",
-            ocr_duration_ms=0.0,
-            ocr_attempted_methods=[],
-            ocr_quality_score=0.0,
-        )
+        processing_time_ms = (time.time() - start_time) * 1000
+        logger.error(f"Error processing {image_path}: {e}")
+        return _build_error_result(image_path, e, processing_time_ms)
 
 
 class BatchProcessingService(BatchProcessingInterface):
@@ -230,7 +243,7 @@ class BatchProcessingService(BatchProcessingInterface):
         # Use provided processors for tests, otherwise use worker-based processing
         if image_processor is not None and receipt_parser is not None:
             # Test mode: use provided fakes directly (sequential only)
-            results = self._process_with_provided_services(
+            results = self._process_with_fakes(
                 image_files, image_processor, receipt_parser, ocr_breakdown
             )
         elif self.config.max_workers > 1:
@@ -284,7 +297,7 @@ class BatchProcessingService(BatchProcessingInterface):
             for image_path in image_files:
                 self._print_processing_header(image_path)
                 future = executor.submit(
-                    _process_single_image_worker,
+                    process_single_image,
                     str(image_path),
                     self.config.mode.value,
                     self.config.max_workers,
@@ -335,7 +348,7 @@ class BatchProcessingService(BatchProcessingInterface):
 
         for image_path in image_files:
             self._print_processing_header(image_path)
-            result = _process_single_image_worker(
+            result = process_single_image(
                 str(image_path),
                 self.config.mode.value,
                 self.config.max_workers,
@@ -384,91 +397,75 @@ class BatchProcessingService(BatchProcessingInterface):
 
         print(format_receipt_result(formatted))
 
-    def _process_with_provided_services(
+    def _process_single_with_fakes(
+        self,
+        image_path: Path,
+        image_processor: ImageProcessingInterface,
+        receipt_parser: ReceiptParsingInterface,
+        ocr_breakdown: Dict[str, int],
+    ) -> ProcessingResult:
+        """Process a single image using fake/test services."""
+        start_time = time.time()
+
+        try:
+            ocr_text, ocr_duration = self._extract_text_with_timing(image_processor, image_path)
+            parse_result = receipt_parser.parse_with_validation_driven_retry(ocr_text, str(image_path))
+            parsed_data = _convert_parsed_data(parse_result)
+            has_meaningful_data = (
+                parse_result.valid and
+                parsed_data and
+                parsed_data.get('items') and
+                len(parsed_data.get('items', [])) > 0 and
+                parsed_data.get('total') is not None
+            )
+            processing_time = (time.time() - start_time) * 1000
+
+            result = ProcessingResult(
+                image_path=str(image_path),
+                success=has_meaningful_data,
+                parsed_data=parsed_data,
+                retries=receipt_parser.get_current_retries(),
+                validation_error=parse_result.error if parse_result.error else None,
+                token_usage=parse_result.token_usage if parse_result.token_usage else TokenUsage(),
+                processing_time_ms=processing_time,
+                ocr_method='fake',
+                ocr_duration_ms=ocr_duration,
+                ocr_attempted_methods=['fake'],
+                ocr_quality_score=0.0,
+            )
+            ocr_breakdown['fake'] = ocr_breakdown.get('fake', 0) + 1
+            self._print_result(result)
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Failed to process {image_path}: {e}")
+            ocr_breakdown["error"] = ocr_breakdown.get("error", 0) + 1
+            return _build_error_result(str(image_path))
+
+    def _extract_text_with_timing(
+        self,
+        image_processor: ImageProcessingInterface,
+        image_path: Path
+    ) -> tuple:
+        """Extract OCR text and return text with duration in ms."""
+        ocr_start = time.time()
+        ocr_text = image_processor.extract_text(str(image_path))
+        ocr_duration = (time.time() - ocr_start) * 1000
+        return ocr_text, ocr_duration
+
+
+    def _process_with_fakes(
         self,
         image_files: List[Path],
         image_processor: ImageProcessingInterface,
         receipt_parser: ReceiptParsingInterface,
         ocr_breakdown: Dict[str, int],
     ) -> List[ProcessingResult]:
-        """Process images using provided service instances (for testing with fakes)
-
-        This method bypasses the worker process creation and uses the provided
-        fake implementations directly, allowing tests to run without filesystem access.
-        """
-        results = []
-
-        for image_path in image_files:
-            start_time = time.time()
-
-            try:
-                # Extract text using provided image processor (fake)
-                ocr_start = time.time()
-                ocr_text = image_processor.extract_text(str(image_path))
-                ocr_duration = (time.time() - ocr_start) * 1000
-
-                # Parse receipt using provided parser (fake)
-                result = receipt_parser.parse_with_validation_driven_retry(ocr_text, str(image_path))
-
-                # Determine success
-                if result.parsed is None:
-                    parsed_data = {}
-                elif hasattr(result.parsed, '__dict__'):
-                    parsed_data = result.parsed.__dict__
-                elif isinstance(result.parsed, dict):
-                    parsed_data = result.parsed
-                else:
-                    parsed_data = {}
-
-                has_meaningful_data = (
-                    result.valid and
-                    parsed_data and
-                    parsed_data.get('items') and
-                    len(parsed_data.get('items', [])) > 0 and
-                    parsed_data.get('total') is not None
-                )
-
-                processing_time = (time.time() - start_time) * 1000
-
-                processing_result = ProcessingResult(
-                    image_path=str(image_path),
-                    success=has_meaningful_data,
-                    parsed_data=parsed_data,
-                    retries=receipt_parser.get_current_retries() if hasattr(receipt_parser, 'get_current_retries') else [],
-                    validation_error=result.error if result.error else None,
-                    token_usage=result.token_usage if result.token_usage else TokenUsage(),
-                    processing_time_ms=processing_time,
-                    ocr_method='fake',
-                    ocr_duration_ms=ocr_duration,
-                    ocr_attempted_methods=['fake'],
-                    ocr_quality_score=0.0,
-                )
-
-                results.append(processing_result)
-                ocr_breakdown['fake'] = ocr_breakdown.get('fake', 0) + 1
-
-                # Print formatted output
-                self._print_result(processing_result)
-
-            except Exception as e:
-                self.logger.error(f"Failed to process {image_path}: {e}")
-                error_result = ProcessingResult(
-                    image_path=str(image_path),
-                    success=False,
-                    parsed_data={},
-                    retries=[],
-                    validation_error=str(e),
-                    token_usage=TokenUsage(),
-                    processing_time_ms=0.0,
-                    ocr_method="error",
-                    ocr_duration_ms=0.0,
-                    ocr_attempted_methods=[],
-                    ocr_quality_score=0.0,
-                )
-                results.append(error_result)
-                ocr_breakdown["error"] = ocr_breakdown.get("error", 0) + 1
-
-        return results
+        """Process images using fake services for testing (no worker processes)."""
+        return [
+            self._process_single_with_fakes(image_path, image_processor, receipt_parser, ocr_breakdown)
+            for image_path in image_files
+        ]
 
     def _log_batch_summary(
         self,

@@ -35,3 +35,17 @@ def handle_validation_error(e: ValidationError, parsed_data: dict, input_tokens:
 def _convert_decimals_to_floats(data: dict) -> dict:
     """Convert Decimal objects to floats for JSON serialization"""
     return _validation_service._convert_decimals_to_floats(data)
+
+
+def has_meaningful_receipt_data(parsed_data: dict) -> bool:
+    """Check if parsed data contains meaningful receipt content.
+
+    Business rule: A receipt must have at least one item and a total
+    to be considered valid/meaningful.
+    """
+    return (
+        parsed_data and
+        parsed_data.get('items') and
+        len(parsed_data.get('items', [])) > 0 and
+        parsed_data.get('total') is not None
+    )

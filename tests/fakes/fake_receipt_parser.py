@@ -79,3 +79,7 @@ class FakeReceiptParser(ReceiptParsingInterface):
             "total_tokens": token_usage.get("input_tokens", 0) + token_usage.get("output_tokens", 0),
             "estimated_cost": 0.0
         }
+
+    def get_current_retries(self) -> list:
+        """Return list of retry strategies used"""
+        return []

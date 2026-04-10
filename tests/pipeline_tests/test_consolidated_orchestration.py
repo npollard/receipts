@@ -36,7 +36,7 @@ def test_consolidated_orchestration():
     # Test 2: ReceiptProcessor with database
     print("\n=== TEST 2: DATABASE INITIALIZATION ===")
     try:
-        from database_models import DatabaseManager
+        from infrastructure.database import DatabaseManager
         db_manager = DatabaseManager()
         # Create tables for test
         db_manager.create_tables()
@@ -155,7 +155,7 @@ def test_architecture_flow():
 
         # Import what main.py imports
         from pipeline.processor import ReceiptProcessor
-        from database_models import DatabaseManager
+        from infrastructure.database import DatabaseManager
 
         # Initialize like main.py does
         db_manager = DatabaseManager()

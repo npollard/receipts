@@ -79,19 +79,22 @@ class FileHandlingService(FileHandlingInterface):
             if result.error:
                 self.logger.error(f"Error: {result.error}")
 
+    def _convert_data_to_dict(self, data: Any) -> Dict[str, Any]:
+        """Convert data to dict - handles both Pydantic models and dicts"""
+        if data is None:
+            return {}
+        if isinstance(data, dict):
+            return data
+        # Assume Pydantic model with model_dump()
+        return data.model_dump()
+
     def process_single_image_result(self, result: APIResponse, image_path: Path) -> APIResponse:
         """Process and format single image result"""
         self.logger.info(f"Processing image: {image_path}")
 
         if result.status == 'success':
             self.logger.info("Extracted Text:")
-            # Handle both dict and ReceiptModel data
-            if hasattr(result.data, 'model_dump'):
-                # It's a Pydantic model
-                data_dict = result.data.model_dump()
-            else:
-                # It's already a dict
-                data_dict = result.data or {}
+            data_dict = self._convert_data_to_dict(result.data)
 
             # Print first 500 characters of extracted text
             extracted_text = data_dict.get('extracted_text', '')
@@ -104,8 +107,7 @@ class FileHandlingService(FileHandlingInterface):
             # Print parsed receipt if available
             if 'parsed_receipt' in data_dict:
                 self.logger.info(f"Parsed Receipt: {data_dict['parsed_receipt']}")
-            elif hasattr(result.data, 'model_dump'):
-                # If it's a ReceiptModel, show the model data
+            elif data_dict:
                 self.logger.info(f"Parsed Receipt: {data_dict}")
         else:
             self.logger.error("FAILED")
@@ -116,16 +118,7 @@ class FileHandlingService(FileHandlingInterface):
 
     def format_result_data(self, result: APIResponse) -> Dict[str, Any]:
         """Format result data for consistent output"""
-        if not result.data:
-            return {}
-
-        # Handle both dict and ReceiptModel data
-        if hasattr(result.data, 'model_dump'):
-            # It's a Pydantic model
-            return result.data.model_dump()
-        else:
-            # It's already a dict
-            return result.data or {}
+        return self._convert_data_to_dict(result.data)
 
     def enrich_result_with_metadata(self, result: APIResponse, metadata: Dict[str, Any]) -> APIResponse:
         """Enrich result with additional metadata"""

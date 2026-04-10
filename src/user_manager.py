@@ -5,9 +5,7 @@ import os
 from typing import Optional
 from uuid import UUID
 
-from database_models import DatabaseManager, User
-from storage import UserRepository
-from receipt_persistence import ReceiptPersistence
+from infrastructure.database import DatabaseManager, User, UserRepository
 
 from config import DEFAULT_USER_EMAIL
 

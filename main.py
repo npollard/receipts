@@ -34,7 +34,7 @@ from image_processing import VisionProcessor
 from domain.parsing.receipt_parser import ReceiptParser
 from services.batch_service import BatchProcessingService
 from services.token_service import TokenUsageService
-from database_models import DatabaseManager
+from infrastructure.database import DatabaseManager
 from config import DATABASE_URL, IS_TEST, app_config, get_runtime_config
 
 # Load environment variables
