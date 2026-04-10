@@ -34,7 +34,7 @@ config.settings.DATABASE_URL = os.environ["DATABASE_URL"]
 config.settings.DATABASE_PATH = temp_db.name
 
 # Import database modules (fresh imports after patching)
-from infrastructure.database import DatabaseManager, ReceiptRepository
+from infrastructure.database import DatabaseManager, ReceiptRepository, UserRepository
 from infrastructure.database.session import create_tables_for_url
 from core.hashing import calculate_receipt_data_hash
 
@@ -104,9 +104,12 @@ def test_database_idempotency():
     db_manager.create_tables()
 
     # Create test user
-    user_id = uuid4()
+    user_repo = UserRepository(db_manager.database_url)
+    user = user_repo.get_or_create_user("test@example.com")
+    user_id = user["id"]
+
+    # Create receipt repository
     repository = ReceiptRepository(user_id, db_manager.database_url)
-    user = repository.get_or_create_user("test@example.com")
 
     # Sample receipt data
     receipt_data = {

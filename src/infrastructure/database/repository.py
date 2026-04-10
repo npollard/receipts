@@ -164,23 +164,6 @@ class ReceiptRepository:
         self._user_id_for_db = handle_uuid_for_db(user_id)
         self.database_url = database_url
 
-    def get_or_create_user(self, email: str) -> dict:
-        """Get existing user or create new one"""
-        with get_session(self.database_url) as session:
-            user = session.query(User).filter(User.email == email).first()
-            if not user:
-                user = User(email=email)
-                session.add(user)
-                session.flush()  # Get ID without full commit (handled by context)
-                logger.info(f"Created new user: {email}")
-            return {
-                "id": str(user.id) if user.id else None,
-                "email": user.email,
-                "created_at": user.created_at,
-                "updated_at": user.updated_at,
-                "is_active": user.is_active,
-            }
-
     def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[ReceiptDTO]:
         """Check if receipt already exists by image hash"""
         with get_read_session(self.database_url) as session:
