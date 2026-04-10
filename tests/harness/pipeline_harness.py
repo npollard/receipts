@@ -68,6 +68,60 @@ class PipelineResult:
 
 
 @dataclass
+class TraceEntry:
+    """Single entry in execution trace.
+
+    Captures stage execution for deterministic replay and debugging.
+    """
+    stage: str  # OCR, PARSE, VALIDATE, RETRY, PERSIST
+    success: bool  # True if stage completed without error
+    attempt: int  # Attempt number (1-based)
+    timestamp: datetime
+    details: Optional[Dict[str, Any]] = None  # Additional context
+
+
+@dataclass
+class ExecutionTrace:
+    """Ordered execution trace of pipeline stages.
+
+    Provides deterministic record of exactly what happened during execution.
+    """
+    entries: List[TraceEntry] = field(default_factory=list)
+
+    def add(self, stage: str, success: bool, attempt: int = 1, details: Optional[Dict] = None) -> None:
+        """Add entry to trace."""
+        self.entries.append(TraceEntry(
+            stage=stage,
+            success=success,
+            attempt=attempt,
+            timestamp=datetime.now(),
+            details=details
+        ))
+
+    def get_all(self) -> List[TraceEntry]:
+        """Get all trace entries in order."""
+        return list(self.entries)
+
+    def get_stage_attempts(self, stage: str) -> int:
+        """Count attempts for a specific stage."""
+        return sum(1 for e in self.entries if e.stage == stage)
+
+    def get_failed_stages(self) -> List[str]:
+        """Get names of stages that failed."""
+        return [e.stage for e in self.entries if not e.success]
+
+    def get_successful_stages(self) -> List[str]:
+        """Get names of stages that succeeded."""
+        return [e.stage for e in self.entries if e.success]
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __iter__(self):
+        return iter(self.entries)
+
+
+@dataclass
 class PipelineState:
     """Mutable state tracked during pipeline execution."""
     image_path: str = ""
@@ -78,6 +132,7 @@ class PipelineState:
     saved_receipt: Any = None
     current_stage: Optional[PipelineStage] = None
     transitions: List[StageTransition] = field(default_factory=list)
+    trace: ExecutionTrace = field(default_factory=ExecutionTrace)
 
 
 class PipelineTestHarness:
@@ -123,6 +178,11 @@ class PipelineTestHarness:
         self._user_id: str = "test_user"
         self._image_hashes: Dict[str, str] = {}  # path -> hash
 
+    @property
+    def trace(self) -> ExecutionTrace:
+        """Get execution trace for the last pipeline run."""
+        return self._state.trace
+
     def with_user(self, user_id: str) -> "PipelineTestHarness":
         """Set the user ID for this pipeline run."""
         self._user_id = user_id
@@ -151,8 +211,9 @@ class PipelineTestHarness:
         return transition
 
     def _end_stage(self, stage: PipelineStage, output_data: Any = None,
-                   exception: Optional[Exception] = None) -> None:
-        """Complete tracking of current stage."""
+                   exception: Optional[Exception] = None, attempt: int = 1) -> None:
+        """Complete tracking of current stage and add to trace."""
+        # Update stage transition
         for transition in reversed(self._state.transitions):
             if transition.stage == stage and transition.exited_at is None:
                 transition.exited_at = datetime.now()
@@ -160,6 +221,24 @@ class PipelineTestHarness:
                 transition.exception = exception
                 break
         self._state.current_stage = None
+
+        # Add to execution trace
+        stage_name_map = {
+            PipelineStage.OCR: "OCR",
+            PipelineStage.PARSING: "PARSE",
+            PipelineStage.VALIDATION: "VALIDATE",
+            PipelineStage.RETRY: "RETRY",
+            PipelineStage.PERSISTENCE: "PERSIST",
+        }
+        stage_name = stage_name_map.get(stage, stage.name)
+        success = exception is None
+
+        self._state.trace.add(
+            stage=stage_name,
+            success=success,
+            attempt=attempt,
+            details={"output": output_data} if output_data else None
+        )
 
     def run(self, image_path: str) -> PipelineResult:
         """Execute the full pipeline on an image.
@@ -496,8 +575,246 @@ class PipelineTestHarness:
                 return (transition.exited_at - transition.entered_at).total_seconds() * 1000
         return None
 
+    # Trace-based assertions
+
+    def assert_trace_stage_sequence(self, expected_sequence: List[str]) -> None:
+        """Assert trace contains exact stage sequence.
+
+        Args:
+            expected_sequence: List of stage names in expected order,
+                              e.g., ["OCR", "PARSE", "VALIDATE", "PERSIST"]
+
+        Raises:
+            AssertionError: If actual sequence doesn't match expected
+        """
+        actual = [entry.stage for entry in self.trace.get_all()]
+
+        if actual != expected_sequence:
+            raise AssertionError(
+                f"Expected trace sequence {expected_sequence},\n"
+                f"got {actual}\n\n"
+                f"Full trace:\n" +
+                "\n".join(f"  {i}: {e.stage} (success={e.success}, attempt={e.attempt})"
+                         for i, e in enumerate(self.trace.get_all()))
+            )
+
+    def assert_trace_stage_count(self, stage: str, expected_count: int) -> None:
+        """Assert trace contains exact number of stage occurrences.
+
+        Args:
+            stage: Stage name to count (e.g., "PARSE")
+            expected_count: Expected number of occurrences
+
+        Raises:
+            AssertionError: If count doesn't match expected
+        """
+        actual = self.trace.get_stage_attempts(stage)
+
+        if actual != expected_count:
+            all_stages = [e.stage for e in self.trace.get_all()]
+            raise AssertionError(
+                f"Expected {expected_count} occurrences of '{stage}', got {actual}\n"
+                f"Full trace stages: {all_stages}"
+            )
+
+    def assert_trace_retry_sequence(self, stage: str, expected_attempts: int) -> None:
+        """Assert retry sequence for a specific stage.
+
+        Verifies that a stage was retried the expected number of times,
+        with failures followed by eventual success.
+
+        Args:
+            stage: Stage name that was retried (e.g., "PARSE")
+            expected_attempts: Total expected attempts (failures + 1 success)
+
+        Raises:
+            AssertionError: If retry pattern doesn't match expected
+        """
+        entries = [e for e in self.trace.get_all() if e.stage == stage]
+
+        if len(entries) != expected_attempts:
+            raise AssertionError(
+                f"Expected {expected_attempts} attempts for '{stage}', got {len(entries)}\n"
+                f"Trace entries for '{stage}':\n" +
+                "\n".join(f"  attempt={e.attempt}, success={e.success}"
+                         for e in entries)
+            )
+
+        # Verify pattern: all but last should fail, last should succeed
+        for i, entry in enumerate(entries):
+            if i < len(entries) - 1:
+                if entry.success:
+                    raise AssertionError(
+                        f"Expected attempt {i+1} of '{stage}' to fail (retry), "
+                        f"but it succeeded\n"
+                        f"Full sequence: " +
+                        ", ".join(f"{e.attempt}:{'✓' if e.success else '✗'}"
+                                 for e in entries)
+                    )
+            else:
+                if not entry.success:
+                    raise AssertionError(
+                        f"Expected final attempt of '{stage}' to succeed, "
+                        f"but it failed\n"
+                        f"Full sequence: " +
+                        ", ".join(f"{e.attempt}:{'✓' if e.success else '✗'}"
+                                 for e in entries)
+                    )
+
+    def assert_trace_matches_expected(
+        self,
+        expected: List[tuple],
+        strict: bool = True
+    ) -> None:
+        """Assert trace matches expected pattern.
+
+        Args:
+            expected: List of (stage, success, attempt) tuples
+            strict: If True, lengths must match exactly; if False,
+                   only checks that expected entries exist in order
+
+        Raises:
+            AssertionError: If trace doesn't match expected pattern
+        """
+        actual = [(e.stage, e.success, e.attempt) for e in self.trace.get_all()]
+
+        if strict:
+            if actual != expected:
+                raise AssertionError(
+                    f"Trace mismatch!\n\n"
+                    f"Expected:\n" +
+                    "\n".join(f"  {i}: stage={s}, success={su}, attempt={a}"
+                             for i, (s, su, a) in enumerate(expected)) +
+                    f"\n\nActual:\n" +
+                    "\n".join(f"  {i}: stage={s}, success={su}, attempt={a}"
+                             for i, (s, su, a) in enumerate(actual))
+                )
+        else:
+            # Check that expected entries exist in order
+            actual_idx = 0
+            for exp_stage, exp_success, exp_attempt in expected:
+                found = False
+                while actual_idx < len(actual):
+                    act_stage, act_success, act_attempt = actual[actual_idx]
+                    actual_idx += 1
+                    if (act_stage == exp_stage and
+                        act_success == exp_success and
+                        act_attempt == exp_attempt):
+                        found = True
+                        break
+                if not found:
+                    raise AssertionError(
+                        f"Expected trace entry not found: "
+                        f"stage={exp_stage}, success={exp_success}, attempt={exp_attempt}\n"
+                        f"Full trace: {actual}"
+                    )
+
+    # Idempotency assertions
+
+    def assert_no_duplicate_persistence(self) -> None:
+        """Assert that duplicate receipts were not persisted (idempotency maintained).
+
+        Verifies that save attempts for duplicate content did not result in additional writes.
+        """
+        metrics = self.repository.get_metrics()
+        actual_writes = metrics.actual_writes
+        save_attempts = metrics.save_attempts
+        duplicates = metrics.duplicate_detections
+
+        if actual_writes != save_attempts - duplicates:
+            raise AssertionError(
+                f"Duplicate persistence detected. "
+                f"Expected {save_attempts - duplicates} actual writes, "
+                f"got {actual_writes}. "
+                f"Save attempts: {save_attempts}, "
+                f"Duplicates detected: {duplicates}"
+            )
+
+    def assert_persist_count(self, expected: int) -> None:
+        """Assert exactly N receipts were persisted (actual DB writes).
+
+        This counts only successful non-duplicate writes, not save() calls.
+
+        Args:
+            expected: Expected number of persisted receipts
+        """
+        metrics = self.repository.get_metrics()
+        actual = metrics.actual_writes
+
+        if actual != expected:
+            raise AssertionError(
+                f"Expected {expected} persisted receipts, got {actual}. "
+                f"Save attempts: {metrics.save_attempts}, "
+                f"Duplicates: {metrics.duplicate_detections}"
+            )
+
+    def assert_unique_hashes(self, expected: int) -> None:
+        """Assert repository contains exactly N unique content hashes.
+
+        This verifies deduplication is working - multiple identical receipts
+        should only store one hash.
+
+        Args:
+            expected: Expected number of unique content hashes
+        """
+        all_receipts = self.repository.get_all()
+        unique_hashes = set()
+        for receipt in all_receipts:
+            hash_val = getattr(receipt, 'receipt_data_hash', None)
+            if hash_val:
+                unique_hashes.add(hash_val)
+
+        actual = len(unique_hashes)
+        if actual != expected:
+            raise AssertionError(
+                f"Expected {expected} unique content hashes, got {actual}. "
+                f"Total receipts in store: {len(all_receipts)}, "
+                f"Unique hashes: {sorted(unique_hashes)}"
+            )
+
+    # State exposure for debugging
+
+    def get_persisted_records(self) -> List[Any]:
+        """Get all persisted receipt records from repository.
+
+        Returns:
+            List of receipt DTOs currently in the repository
+        """
+        return self.repository.get_all()
+
+    def get_content_hashes(self) -> List[str]:
+        """Get all unique content hashes currently stored.
+
+        Returns:
+            List of unique data hash values
+        """
+        all_receipts = self.repository.get_all()
+        hashes = set()
+        for receipt in all_receipts:
+            hash_val = getattr(receipt, 'receipt_data_hash', None)
+            if hash_val:
+                hashes.add(hash_val)
+        return sorted(list(hashes))
+
+    def get_image_hashes(self) -> List[str]:
+        """Get all image hashes used during processing.
+
+        Returns:
+            List of image hash values
+        """
+        return sorted(list(self._image_hashes.values()))
+
+    def get_repository_metrics(self) -> Any:
+        """Get detailed repository operation metrics.
+
+        Returns:
+            RepositoryMetrics with save attempts, actual writes, duplicates, etc.
+        """
+        return self.repository.get_metrics()
+
     def get_full_report(self) -> Dict[str, Any]:
         """Get complete execution report for debugging."""
+        metrics = self.repository.get_metrics()
         return {
             "status": self._last_result.status.value if self._last_result else None,
             "stages": [
@@ -511,5 +828,13 @@ class PipelineTestHarness:
             "retry_count": self._last_result.retry_count if self._last_result else 0,
             "ocr_method": self._last_result.ocr_method if self._last_result else None,
             "repository_saves": self.repository.get_save_count(),
+            "repository_metrics": {
+                "save_attempts": metrics.save_attempts,
+                "actual_writes": metrics.actual_writes,
+                "duplicate_detections": metrics.duplicate_detections,
+                "constraint_violations": metrics.constraint_violations,
+            },
+            "persisted_count": len(self.get_persisted_records()),
+            "unique_hashes": len(self.get_content_hashes()),
             "validation_failed_fields": self.validator.get_failed_fields(),
         }

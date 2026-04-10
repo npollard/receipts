@@ -9,7 +9,7 @@ import os
 import sys
 import time
 import warnings
-from typing import Any, List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple, Union
 from dataclasses import dataclass
 from langchain_core.runnables import RunnableLambda
 
@@ -512,9 +512,39 @@ class OCRService(ImageProcessingInterface):
 
         logger.debug("="*80)
 
-    def _preprocess_image(self, image_path: str) -> dict:
-        """Preprocess image for EasyOCR"""
+    def _preprocess_image(self, image_input: Union[str, np.ndarray]) -> dict:
+        """Preprocess image for EasyOCR
+
+        Args:
+            image_input: Either a file path (str) or a numpy array (np.ndarray)
+
+        Returns:
+            Dict with image_path, image_array, original_size, mode
+        """
         try:
+            # Handle numpy array input (for testing)
+            if isinstance(image_input, np.ndarray):
+                image_array = image_input
+
+                # Defensive validation of image array
+                if image_array is None or not isinstance(image_array, np.ndarray):
+                    raise ImageProcessingError("Invalid image array")
+
+                if image_array.size == 0:
+                    raise ImageProcessingError("Empty image array")
+
+                # Debug logging after preprocessing
+                logger.debug(f"Preprocessed image shape: {image_array.shape}, dtype: {image_array.dtype}")
+
+                return {
+                    'image_path': 'ndarray_input',
+                    'image_array': image_array,
+                    'original_size': (image_array.shape[1], image_array.shape[0]) if len(image_array.shape) >= 2 else (0, 0),
+                    'mode': 'RGB' if len(image_array.shape) == 3 else 'L'
+                }
+
+            # Handle file path input
+            image_path = image_input
             if not os.path.exists(image_path):
                 raise ImageProcessingError(f"Image file not found: {image_path}")
 
@@ -564,7 +594,7 @@ class OCRService(ImageProcessingInterface):
             raise
         except Exception as e:
             # Catch any unexpected errors and wrap them
-            raise ImageProcessingError(f"Unexpected error preprocessing image {image_path}: {str(e)}")
+            raise ImageProcessingError(f"Unexpected error preprocessing image {image_input}: {str(e)}")
 
     def _extract_easyocr_text(self, image_input: Any) -> str:
         """Extract text using EasyOCR"""
@@ -1172,9 +1202,18 @@ class OCRService(ImageProcessingInterface):
         """
         return should_fallback(text, threshold)
 
-    def get_fallback_reasoning(self, text: str, threshold: float) -> Dict[str, Any]:
+    def get_fallback_reasoning(self, text: str, threshold: float = None) -> Dict[str, Any]:
         """Get detailed reasoning for fallback decision.
 
         Delegates to domain logic for quality assessment and reasoning.
+
+        Args:
+            text: OCR text to evaluate
+            threshold: Quality threshold (defaults to self.quality_threshold)
+
+        Returns:
+            Dict with quality_score, threshold, recommendation, reasoning, component_scores
         """
+        if threshold is None:
+            threshold = self.quality_threshold
         return get_fallback_reasoning(text, threshold)

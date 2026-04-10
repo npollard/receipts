@@ -1,0 +1,24 @@
+{
+  "currency": "USD",
+  "items": [
+    {
+      "name": "Caesar Salad",
+      "price": 12.95,
+      "quantity": 1
+    },
+    {
+      "name": "Grilled Salmon",
+      "price": 24.95,
+      "quantity": 1
+    },
+    {
+      "name": "Sparkling Water",
+      "price": 3.5,
+      "quantity": 2
+    }
+  ],
+  "merchant_name": "Bistro Cafe",
+  "receipt_date": "2024-02-20",
+  "tax_amount": null,
+  "total_amount": 47.35
+}

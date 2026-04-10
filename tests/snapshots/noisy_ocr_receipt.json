@@ -1,0 +1,19 @@
+{
+  "currency": "USD",
+  "items": [
+    {
+      "name": "Coffee",
+      "price": 3.50,
+      "quantity": 1
+    },
+    {
+      "name": "Bagel",
+      "price": 2.25,
+      "quantity": 1
+    }
+  ],
+  "merchant_name": "Corner Cafe",
+  "receipt_date": "2024-03-10",
+  "tax_amount": 0.46,
+  "total_amount": 6.21
+}
