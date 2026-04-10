@@ -30,7 +30,7 @@ class PerformanceTest:
 
         # Create test user
         test_user = self.user_repo.get_or_create_user("performance-test@example.com")
-        test_user_id = test_user["id"]
+        test_user_id = test_user.id
 
         # Create test receipts
         receipts = []
@@ -235,9 +235,9 @@ class PerformanceTest:
             test_user = self.setup_test_data(500)  # Smaller number for faster testing
 
             # Run tests
-            self.test_user_scoped_queries(test_user["id"])
-            self.test_hash_based_queries(test_user["id"])
-            self.test_complex_queries(test_user["id"])
+            self.test_user_scoped_queries(test_user.id)
+            self.test_hash_based_queries(test_user.id)
+            self.test_complex_queries(test_user.id)
             self.test_receipt_item_queries()
 
             print("\n=== Performance Test Summary ===")

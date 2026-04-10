@@ -106,7 +106,7 @@ def test_database_idempotency():
     # Create test user
     user_repo = UserRepository(db_manager.database_url)
     user = user_repo.get_or_create_user("test@example.com")
-    user_id = user["id"]
+    user_id = user.id
 
     # Create receipt repository
     repository = ReceiptRepository(user_id, db_manager.database_url)

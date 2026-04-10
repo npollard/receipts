@@ -210,3 +210,22 @@ def receipt_to_dto(receipt: OrmReceipt) -> "ReceiptDTO":
         created_at=receipt.created_at,
         updated_at=receipt.updated_at,
     )
+
+
+def user_to_dto(user) -> "UserDTO":
+    """Convert ORM User entity to UserDTO.
+
+    Args:
+        user: ORM User entity
+
+    Returns:
+        UserDTO instance
+    """
+    from shared.models.user_dto import UserDTO
+    return UserDTO(
+        id=str(user.id) if user.id else "",
+        email=user.email,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        is_active=user.is_active if user.is_active is not None else True,
+    )

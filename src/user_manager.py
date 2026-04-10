@@ -6,6 +6,7 @@ from typing import Optional
 from uuid import UUID
 
 from infrastructure.database import DatabaseManager, UserRepository
+from shared.models.user_dto import UserDTO
 
 from config import DEFAULT_USER_EMAIL
 
@@ -20,15 +21,15 @@ class UserManager:
         self._current_user_id = None
         self._current_user = None
 
-    def get_or_create_default_user(self) -> dict:
+    def get_or_create_default_user(self) -> UserDTO:
         """Get or create a default user for single-user mode"""
         # Use config default email
         default_email = DEFAULT_USER_EMAIL
 
         user = self.user_repository.get_or_create_user(default_email)
         self._current_user = user
-        self._current_user_id = user["id"]
-        logger.info(f"Using default user: {default_email} ({user['id']})")
+        self._current_user_id = user.id
+        logger.info(f"Using default user: {default_email} ({user.id})")
         return user
 
     def get_current_user_id(self) -> UUID:
@@ -37,25 +38,25 @@ class UserManager:
             self.get_or_create_default_user()
         return self._current_user_id
 
-    def get_current_user(self) -> dict:
+    def get_current_user(self) -> UserDTO:
         """Get the current user object"""
         if self._current_user is None:
             self.get_or_create_default_user()
         return self._current_user
 
-    def set_user_by_email(self, email: str) -> dict:
+    def set_user_by_email(self, email: str) -> UserDTO:
         """Set current user by email (creates if not found)"""
         user = self.user_repository.get_or_create_user(email)
         self._current_user = user
-        self._current_user_id = user["id"]
+        self._current_user_id = user.id
         return user
 
-    def set_user_by_id(self, user_id: UUID) -> Optional[dict]:
+    def set_user_by_id(self, user_id: UUID) -> Optional[UserDTO]:
         """Set current user by ID (returns None if not found)"""
         user = self.user_repository.get_user_by_id(user_id)
         if user:
             self._current_user = user
-            self._current_user_id = user["id"]
+            self._current_user_id = user.id
         return user
 
     def is_multi_user_mode(self) -> bool:
@@ -66,8 +67,8 @@ class UserManager:
         """Get user context information"""
         user = self.get_current_user()
         return {
-            "user_id": str(user["id"]),
-            "email": user["email"],
+            "user_id": str(user.id),
+            "email": user.email,
             "is_multi_user": self.is_multi_user_mode(),
-            "created_at": user["created_at"].isoformat() if user["created_at"] else None
+            "created_at": user.created_at.isoformat() if user.created_at else None
         }
