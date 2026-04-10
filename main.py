@@ -85,8 +85,9 @@ def main():
 
     # Set user if specified
     if args.user_email and db_manager:
-        user = processor.switch_user(args.user_email)
-        logger.info(f"Processing as user: {user.email} ({user.id})")
+        processor.switch_user(args.user_email)
+        user_context = processor.get_user_context()
+        logger.info(f"Processing as user: {user_context['email']} ({user_context['user_id']})")
     elif db_manager:
         user_context = processor.get_user_context()
         logger.info(f"Processing as default user: {user_context['email']} ({user_context['user_id']})")

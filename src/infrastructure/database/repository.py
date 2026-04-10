@@ -163,7 +163,7 @@ class ReceiptRepository:
         self._user_id_for_db = handle_uuid_for_db(user_id)
         self.database_url = database_url
 
-    def get_or_create_user(self, email: str) -> User:
+    def get_or_create_user(self, email: str) -> dict:
         """Get existing user or create new one"""
         with get_session(self.database_url) as session:
             user = session.query(User).filter(User.email == email).first()
@@ -172,9 +172,15 @@ class ReceiptRepository:
                 session.add(user)
                 session.flush()  # Get ID without full commit (handled by context)
                 logger.info(f"Created new user: {email}")
-            return user
+            return {
+                "id": str(user.id) if user.id else None,
+                "email": user.email,
+                "created_at": user.created_at,
+                "updated_at": user.updated_at,
+                "is_active": user.is_active,
+            }
 
-    def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[Receipt]:
+    def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[dict]:
         """Check if receipt already exists by image hash"""
         with get_read_session(self.database_url) as session:
             receipt_hash = calculate_image_hash(image_path)
@@ -185,9 +191,11 @@ class ReceiptRepository:
 
             if receipt:
                 logger.info(f"Found duplicate receipt by image hash: {receipt.id}")
-            return receipt
+                from .mappers import receipt_to_dict
+                return receipt_to_dict(receipt)
+            return None
 
-    def check_duplicate_receipt_data(self, receipt_data: Dict[str, Any]) -> Optional[Receipt]:
+    def check_duplicate_receipt_data(self, receipt_data: Dict[str, Any]) -> Optional[dict]:
         """Check if receipt data already exists by data hash"""
         with get_read_session(self.database_url) as session:
             receipt_data_hash = calculate_receipt_data_hash(receipt_data)
@@ -198,12 +206,14 @@ class ReceiptRepository:
 
             if receipt:
                 logger.info(f"Found duplicate receipt by data hash: {receipt.id}")
-            return receipt
+                from .mappers import receipt_to_dict
+                return receipt_to_dict(receipt)
+            return None
 
     def save_receipt(self, image_path: str, ocr_text: str, parsed_response: APIResponse,
                     input_tokens: int = 0, output_tokens: int = 0,
                     estimated_cost: Decimal = Decimal('0.000000'),
-                    ocr_confidence: Optional[float] = None) -> Tuple[Receipt, str]:
+                    ocr_confidence: Optional[float] = None) -> Tuple[dict, str]:
         """Save a complete receipt with OCR and parsed data with idempotency"""
         # Validate inputs
         if not image_path or not isinstance(image_path, str):
@@ -288,7 +298,8 @@ class ReceiptRepository:
                     raise StorageError(f"Failed to save receipt items: {str(e)}")
 
             logger.info(f"Successfully saved receipt {receipt.id} for user {self.user_id}")
-            return receipt, "created"
+            from .mappers import receipt_to_dict
+            return receipt_to_dict(receipt), "created"
 
     def _save_receipt_items(self, session, receipt_id: UUID, items: List[ReceiptItemModel]):
         """Save receipt items with proper error handling"""
@@ -344,7 +355,13 @@ class ReceiptRepository:
             session.flush()  # ID assigned here, commit by context manager
 
             logger.info(f"Created pending receipt {receipt.id} for user {self.user_id}")
-            return receipt
+
+            # Flush and refresh to ensure all fields are populated
+            session.flush()
+            session.refresh(receipt)
+
+            from .mappers import receipt_to_dict
+            return receipt_to_dict(receipt)
 
     def update_failure(self, receipt_id: UUID, error_message: str):
         """Update receipt status to failed with error message"""
@@ -359,7 +376,7 @@ class ReceiptRepository:
 
     def update_receipt_success(self, receipt_id: UUID, parsed_response: APIResponse,
                                input_tokens: int = 0, output_tokens: int = 0,
-                               estimated_cost: Decimal = Decimal('0.000000')) -> Receipt:
+                               estimated_cost: Decimal = Decimal('0.000000')) -> dict:
         """Update receipt with successful parsing results"""
         receipt_id_for_db = handle_uuid_for_db(receipt_id)
         with get_session(self.database_url) as session:
@@ -406,10 +423,15 @@ class ReceiptRepository:
                 session.flush()
                 session.refresh(receipt)
 
-            return receipt
+                from .mappers import receipt_to_dict
+                return receipt_to_dict(receipt)
+
+            # If not success, still return dict
+            from .mappers import receipt_to_dict
+            return receipt_to_dict(receipt)
 
     def fetch_user_receipts(self, limit: int = 50, offset: int = 0,
-                           order_by: str = 'created_at', order_dir: str = 'desc') -> List[Receipt]:
+                           order_by: str = 'created_at', order_dir: str = 'desc') -> List[dict]:
         """Fetch receipts for current user"""
         with get_read_session(self.database_url) as session:
             query = session.query(Receipt).filter(Receipt.user_id == self._user_id_for_db)
@@ -421,7 +443,9 @@ class ReceiptRepository:
             else:
                 query = query.order_by(order_column.asc())
 
-            return query.offset(offset).limit(limit).all()
+            receipts = query.offset(offset).limit(limit).all()
+            from .mappers import receipt_to_dict
+            return [receipt_to_dict(r) for r in receipts]
 
 
 # Module-level connection cache for helper functions

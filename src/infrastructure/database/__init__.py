@@ -15,7 +15,6 @@ from .repository import (
     DatabaseConnection as DatabaseTransactionHelper,  # Backward compatibility
     DatabaseConnection as DatabaseQueryHelper,  # Backward compatibility
     ReceiptRepository,
-    IdempotencyHelper,
     handle_uuid_for_db,
     with_database_session,
     with_transaction,
@@ -41,6 +40,7 @@ from .mappers import (
     update_orm_from_domain,
     domain_item_to_orm,
     orm_item_to_domain,
+    receipt_to_dict,
 )
 
 __all__ = [
@@ -58,7 +58,6 @@ __all__ = [
     'DatabaseQueryHelper',
     'ReceiptRepository',
     'UserRepository',
-    'IdempotencyHelper',
     'handle_uuid_for_db',
     'with_database_session',
     'with_transaction',
@@ -76,4 +75,5 @@ __all__ = [
     'update_orm_from_domain',
     'domain_item_to_orm',
     'orm_item_to_domain',
+    'receipt_to_dict',
 ]
