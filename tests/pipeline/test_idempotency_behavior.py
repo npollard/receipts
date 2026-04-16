@@ -10,6 +10,9 @@ Verifies that:
 import pytest
 from tests.harness.pipeline_harness import PipelineTestHarness, PipelineStatus
 from tests.harness.builders import ReceiptBuilder
+from tests.harness.fakes import OCROutput
+from tests.harness.fakes.fake_receipt_parser import ParserOutput
+from core.exceptions import OCRError
 
 
 class TestRetryDoesNotDuplicate:
@@ -293,9 +296,3 @@ class TestHashCollisionHandling:
         # 2 distinct records (different content = different hashes)
         harness.assert_persist_count(2)
         harness.assert_unique_hashes(2)
-
-
-# Import needed for type hints
-from tests.harness.fakes import OCROutput
-from tests.harness.fakes.fake_receipt_parser import ParserOutput
-from core.exceptions import OCRError, DataIntegrityError

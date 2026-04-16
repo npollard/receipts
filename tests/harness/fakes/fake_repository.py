@@ -79,6 +79,7 @@ class FakeRepository(FakeComponent):
         self._constraint_violations: Dict[str, Exception] = {}
         self._latency_ms: float = 0.0
         self._auto_generate_ids: bool = True
+        self._next_receipt_id: Optional[str] = None
 
         # Metrics tracking
         self._metrics = RepositoryMetrics()
@@ -178,15 +179,55 @@ class FakeRepository(FakeComponent):
         self._latency_ms = ms
         return self
 
+    def should_succeed(self, receipt_id: str) -> "FakeRepository":
+        """Configure persistence to succeed with given receipt ID.
+
+        Args:
+            receipt_id: ID to return on successful save
+
+        Returns:
+            Self for chaining
+        """
+        self._next_receipt_id = receipt_id
+        # Clear any failure configuration
+        self._should_fail_on.pop("save", None)
+        return self
+
+    def set_always_fail(self, error: str) -> "FakeRepository":
+        """Configure persistence to always fail with given error.
+
+        Args:
+            error: Error message/code for all failures
+
+        Returns:
+            Self for chaining
+        """
+        self._should_fail_on["save"] = Exception(error)
+        return self
+
     def _simulate_latency(self) -> None:
         """Apply configured latency."""
         if self._latency_ms > 0:
             time.sleep(self._latency_ms / 1000.0)
 
     def _check_should_fail(self, operation: str) -> None:
-        """Check if operation should fail and raise if so."""
+        """Check if operation should fail and raise if so.
+
+        Supports attempt-counted failures via _failure_count and _success_after_failures
+        attributes for scenario-based testing.
+        """
         exc = self._should_fail_on.get(operation)
         if exc:
+            # Check for attempt-counted failures (scenario DSL support)
+            failure_count = getattr(self, '_failure_count', 0)
+            if failure_count > 0:
+                # Decrement and fail
+                self._failure_count -= 1
+                if self._failure_count == 0 and getattr(self, '_success_after_failures', False):
+                    # Clear failure flag after last failure for success scenario
+                    self._should_fail_on[operation] = None
+                raise exc
+            # Simple failure (no count)
             raise exc
 
     def _check_constraints(self, image_hash: str, data_hash: str) -> None:
@@ -236,6 +277,14 @@ class FakeRepository(FakeComponent):
         """Get current repository metrics."""
         return self._metrics
 
+    def get_attempt_count(self) -> int:
+        """Get number of save attempts made.
+
+        Returns:
+            Total number of times save_receipt was called
+        """
+        return self._metrics.save_attempts
+
     # Receipt operations
 
     def save_receipt(
@@ -264,7 +313,14 @@ class FakeRepository(FakeComponent):
         self._metrics.save_attempts += 1
 
         # Generate IDs and hashes
-        receipt_id = str(uuid4()) if self._auto_generate_ids else "manual_id"
+        # Use explicit None check to handle empty string IDs
+        if self._next_receipt_id is not None:
+            receipt_id = self._next_receipt_id
+            self._next_receipt_id = None  # Clear after use
+        elif self._auto_generate_ids:
+            receipt_id = str(uuid4())
+        else:
+            receipt_id = "manual_id"
         data_hash = receipt_data.get('data_hash') or self._compute_data_hash(receipt_data)
         img_hash = image_hash or f"img_{receipt_id}"
 

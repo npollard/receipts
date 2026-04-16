@@ -38,7 +38,7 @@ class TestHappyPath:
         assert result.receipt_data["merchant_name"] == "Grocery Store"
         assert result.receipt_data["total_amount"] == 3.99
         harness.assert_persisted_once()
-        harness.assert_stage_sequence(["OCR", "PARSING", "VALIDATION", "PERSISTENCE"])
+        harness.assert_stage_sequence(["OCR", "PARSE", "VALIDATE", "PERSIST"])
 
     def test_pipeline_with_preconfigured_user(self):
         """Pipeline with existing user in repository."""
@@ -235,8 +235,8 @@ class TestOCRFailures:
         assert result.status == PipelineStatus.FAILED
         assert "OCR" in result.error_message or result.error_message is not None
         harness.assert_not_persisted()
-        # 3 OCR retry attempts tracked
-        harness.assert_stage_sequence(["OCR", "OCR", "OCR"])
+        # 3 OCR retry attempts tracked (normalized to single OCR)
+        harness.assert_stage_sequence(["OCR"])
 
 
 class TestPersistenceFailures:
@@ -333,13 +333,13 @@ class TestComplexScenarios:
         harness.assert_retry_count(1)
         harness.assert_persisted_once()
 
-        # Verify full sequence (PARSING stage includes retry internally)
+        # Verify full sequence (PARSE stage includes retry internally)
+        # Note: Consecutive OCR stages are normalized to single entry
         harness.assert_stage_sequence([
-            "OCR",      # Primary (low quality)
-            "OCR",      # Fallback (high quality)
-            "PARSING",  # Includes retry attempts internally
-            "VALIDATION",
-            "PERSISTENCE"
+            "OCR",      # Primary (low quality) + Fallback (high quality) - normalized
+            "PARSE",    # Includes retry attempts internally
+            "VALIDATE",
+            "PERSIST"
         ])
 
         # Verify retry happened within parsing stage

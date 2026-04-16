@@ -52,7 +52,21 @@ def test_receipt_processor_process_directly_returns_expected_receipt_and_token_u
         )
         return result
 
-    monkeypatch.setattr("image_processing.VisionProcessor.extract_text", fake_extract_text)
+    def fake_extract_text_with_obs(self, path: str):
+        from services.ocr_service import OCRObservability
+        text = fake_extract_text(self, path)
+        obs = OCRObservability(
+            method="test",
+            start_time=0.0,
+            end_time=1.0,
+            quality_score=0.95,
+            text_length=len(text),
+            confidence_threshold=0.5,
+            attempted_methods=["test"]
+        )
+        return text, obs
+
+    monkeypatch.setattr("services.ocr_service.OCRService.extract_text_with_observability", fake_extract_text_with_obs)
     monkeypatch.setattr(
         "domain.parsing.receipt_parser.ReceiptParser.parse_text",
         fake_parse_text,

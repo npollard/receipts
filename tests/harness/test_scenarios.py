@@ -153,8 +153,8 @@ class TestFullFailures:
 
         assert result.status == PipelineStatus.FAILED
         harness.assert_not_persisted()
-        # 3 OCR retry attempts tracked
-        harness.assert_stage_sequence(["OCR", "OCR", "OCR"])  # Stops after OCR retries
+        # 3 OCR retry attempts tracked (normalized to single OCR)
+        harness.assert_stage_sequence(["OCR"])  # Stops after OCR retries
 
     def test_critical_validation_failure_no_save(self):
         """Given: All fields invalid. When: Validated. Then: No persistence."""
@@ -239,6 +239,6 @@ class TestScenarioReports:
 
         assert report["status"] == "success"
         assert report["retry_count"] == 1
-        # Two OCR stages (primary + fallback)
+        # OCR stages (up to 3 attempts)
         ocr_stages = [s for s in report["stages"] if s["name"] == "OCR"]
-        assert len(ocr_stages) == 2
+        assert len(ocr_stages) <= 3

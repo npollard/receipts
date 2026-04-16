@@ -163,6 +163,11 @@ class ReceiptRepository:
         self._user_id_for_db = handle_uuid_for_db(user_id)
         self.database_url = database_url
 
+    def find_by_hash(self, image_hash: str) -> Optional[ReceiptDTO]:
+        """Alias for find_existing_receipt_by_image_hash for Processor compatibility."""
+        # The image_hash parameter is actually the image_path in the current implementation
+        return self.find_existing_receipt_by_image_hash(image_hash)
+
     def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[ReceiptDTO]:
         """Check if receipt already exists by image hash"""
         with get_read_session(self.database_url) as session:

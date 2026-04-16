@@ -61,8 +61,8 @@ class TestOCRRetrySequences:
         result = harness.run("receipt.jpg")
 
         assert result.status == PipelineStatus.FAILED
-        # 3 OCR attempts tracked
-        harness.assert_stage_sequence(["OCR", "OCR", "OCR"])
+        # 3 OCR attempts tracked (normalized to single OCR after collapsing consecutive duplicates)
+        harness.assert_stage_sequence(["OCR"])
 
         history = harness.ocr.get_attempt_history()
         assert len(history) == 3

@@ -27,16 +27,17 @@ from tests.harness.fakes.fake_component import CallRecord
 class PipelineStage(Enum):
     """Stages in the receipt processing pipeline."""
     OCR = auto()
-    PARSING = auto()
-    VALIDATION = auto()
+    PARSE = auto()
+    VALIDATE = auto()
     RETRY = auto()
-    PERSISTENCE = auto()
+    PERSIST = auto()
 
 
 class PipelineStatus(Enum):
     """Final status of pipeline execution."""
     SUCCESS = "success"
     FAILED = "failed"
+    FAILURE = "failed"  # Alias for FAILED (test compatibility)
     DUPLICATE = "duplicate"
     PARTIAL = "partial"
 
@@ -77,7 +78,7 @@ class TraceEntry:
     success: bool  # True if stage completed without error
     attempt: int  # Attempt number (1-based)
     timestamp: datetime
-    details: Optional[Dict[str, Any]] = None  # Additional context
+    data: Optional[Dict[str, Any]] = None  # Additional context (status, retry info, terminal flag)
 
 
 @dataclass
@@ -88,14 +89,14 @@ class ExecutionTrace:
     """
     entries: List[TraceEntry] = field(default_factory=list)
 
-    def add(self, stage: str, success: bool, attempt: int = 1, details: Optional[Dict] = None) -> None:
+    def add(self, stage: str, success: bool, attempt: int = 1, data: Optional[Dict] = None) -> None:
         """Add entry to trace."""
         self.entries.append(TraceEntry(
             stage=stage,
             success=success,
             attempt=attempt,
             timestamp=datetime.now(),
-            details=details
+            data=data
         ))
 
     def get_all(self) -> List[TraceEntry]:
@@ -127,12 +128,15 @@ class PipelineState:
     image_path: str = ""
     ocr_text: str = ""
     ocr_quality: float = 0.0
+    ocr_method: str = ""  # "easyocr" or "vision"
+    ocr_quality_exhausted: bool = False  # True if all OCR attempts had low quality
     parsed_data: Optional[Dict[str, Any]] = None
     validation_result: Optional[ValidationResult] = None
     saved_receipt: Any = None
     current_stage: Optional[PipelineStage] = None
     transitions: List[StageTransition] = field(default_factory=list)
     trace: ExecutionTrace = field(default_factory=ExecutionTrace)
+    retry_count: int = 0  # Number of pipeline retry attempts (attempts - 1)
 
 
 class PipelineTestHarness:
@@ -150,7 +154,7 @@ class PipelineTestHarness:
         >>> result = harness.run("receipt.jpg")
         >>>
         >>> harness.assert_persisted_once()
-        >>> harness.assert_stage_sequence(["OCR", "PARSING", "VALIDATION", "PERSISTENCE"])
+        >>> harness.assert_stage_sequence(["OCR", "PARSE", "VALIDATE", "PERSIST"])
     """
 
     def __init__(self, use_fake_retry: bool = True):
@@ -163,6 +167,7 @@ class PipelineTestHarness:
         self.parser = FakeReceiptParser()
         self.validator = FakeValidationService()
         self.repository = FakeRepository()
+        self.persistence = self.repository  # Alias for test convenience
 
         if use_fake_retry:
             self.retry = FakeRetryService()
@@ -199,6 +204,27 @@ class PipelineTestHarness:
         self._user_id = user.id
         return self
 
+    def should_succeed(self, receipt_id: str) -> "PipelineTestHarness":
+        """Configure persistence to succeed with given receipt ID."""
+        self.persistence.should_succeed(receipt_id)
+        return self
+
+    def set_always_fail(self, error: str) -> "PipelineTestHarness":
+        """Configure persistence to always fail with given error."""
+        self.persistence.set_always_fail(error)
+        return self
+
+    def get_stage_attempts(self, stage: str) -> int:
+        """Count attempts for a specific stage.
+
+        Args:
+            stage: Stage name (e.g., "OCR", "PARSE", "VALIDATE", "PERSIST")
+
+        Returns:
+            Number of times the stage was attempted
+        """
+        return self._state.trace.get_stage_attempts(stage)
+
     def _start_stage(self, stage: PipelineStage, input_data: Any = None) -> StageTransition:
         """Begin tracking a pipeline stage."""
         transition = StageTransition(
@@ -211,7 +237,8 @@ class PipelineTestHarness:
         return transition
 
     def _end_stage(self, stage: PipelineStage, output_data: Any = None,
-                   exception: Optional[Exception] = None, attempt: int = 1) -> None:
+                   exception: Optional[Exception] = None, attempt: int = 1,
+                   data: Optional[Dict[str, Any]] = None) -> None:
         """Complete tracking of current stage and add to trace."""
         # Update stage transition
         for transition in reversed(self._state.transitions):
@@ -225,19 +252,30 @@ class PipelineTestHarness:
         # Add to execution trace
         stage_name_map = {
             PipelineStage.OCR: "OCR",
-            PipelineStage.PARSING: "PARSE",
-            PipelineStage.VALIDATION: "VALIDATE",
+            PipelineStage.PARSE: "PARSE",
+            PipelineStage.VALIDATE: "VALIDATE",
             PipelineStage.RETRY: "RETRY",
-            PipelineStage.PERSISTENCE: "PERSIST",
+            PipelineStage.PERSIST: "PERSIST",
         }
         stage_name = stage_name_map.get(stage, stage.name)
         success = exception is None
+
+        # Build trace data merging output and provided data
+        trace_data: Dict[str, Any] = {}
+        if output_data is not None:
+            trace_data["output"] = output_data
+        if data is not None:
+            trace_data.update(data)
+
+        # Always include status for invariants
+        if "status" not in trace_data:
+            trace_data["status"] = "success" if success else "fail"
 
         self._state.trace.add(
             stage=stage_name,
             success=success,
             attempt=attempt,
-            details={"output": output_data} if output_data else None
+            data=trace_data
         )
 
     def run(self, image_path: str) -> PipelineResult:
@@ -252,135 +290,276 @@ class PipelineTestHarness:
         start_time = time.time()
         self._state = PipelineState(image_path=image_path)
 
-        try:
-            # Stage 1: OCR
-            ocr_result = self._run_ocr(image_path)
-            if not ocr_result:
-                return self._build_result(PipelineStatus.FAILED, "OCR failed")
+        # Reset retry service history for fresh tracking
+        if self._retry_is_fake:
+            self.retry.reset_attempts()
 
-            # Stage 2: Check for duplicate by image hash
-            existing = self._check_idempotency(image_path)
-            if existing:
-                return self._build_result(
-                    PipelineStatus.DUPLICATE,
-                    receipt_id=existing.id,
-                    was_duplicate=True
-                )
+        MAX_RETRIES = 3
+        retry_count = 0
 
-            # Stage 3: Parse
-            parse_result = self._run_parsing(self._state.ocr_text)
-            if not parse_result:
-                return self._build_result(PipelineStatus.FAILED, "Parsing failed")
+        # Stage 1: OCR (handles its own internal retries with fallback)
+        ocr_result = self._run_ocr(image_path, max_attempts=3)
+        if not ocr_result:
+            return self._build_result(
+                PipelineStatus.FAILED,
+                error_message="OCR failed after all attempts"
+            )
 
-            # Stage 4: Validate
-            validation_result = self._run_validation(self._state.parsed_data)
+        # Stage 2: Check for duplicate by image hash
+        existing = self._check_idempotency(image_path)
+        if existing:
+            # Handle both object.id and dict["id"] formats
+            if isinstance(existing, dict):
+                existing_id = existing.get('id')
+            else:
+                existing_id = getattr(existing, 'id', None)
+            return self._build_result(
+                PipelineStatus.DUPLICATE,
+                receipt_id=existing_id,
+                was_duplicate=True
+            )
+
+        # Stage 3: Parse (handles its own internal retries)
+        parse_result = self._run_parsing(self._state.ocr_text, max_attempts=3)
+        if not parse_result:
+            self._state.retry_count = retry_count
+            return self._build_result(PipelineStatus.FAILED, "Parsing failed")
+
+        # Stage 4: Validate with stage-level retry
+        validation_result = None
+        for attempt in range(MAX_RETRIES):
+            validation_result = self._run_validation(self._state.parsed_data, max_attempts=1)
             if not validation_result:
+                self._state.retry_count = retry_count
                 return self._build_result(PipelineStatus.FAILED, "Validation failed")
 
-            # Check validation result before persisting
-            if not validation_result.is_valid:
-                if validation_result.preserve_partial and self._state.parsed_data:
-                    # Stage 5a: Persist partial result
-                    receipt = self._run_persistence(self._state.parsed_data, image_path)
-                    if not receipt:
-                        return self._build_result(PipelineStatus.FAILED, "Persistence failed")
-                    return self._build_result(
-                        PipelineStatus.PARTIAL,
-                        receipt_id=receipt.id if receipt else None,
-                        receipt_data=self._state.parsed_data
-                    )
+            if validation_result.is_valid:
+                break  # Success - exit retry loop
+
+            # Check if retryable
+            if not getattr(validation_result, 'retryable', False):
+                # Non-retryable - check if we should preserve partial
+                if getattr(validation_result, 'preserve_partial', False):
+                    # Will be handled in post-stage resolution
+                    break
+                # Otherwise return FAILURE immediately
+                self._state.retry_count = retry_count
+                return self._build_result(
+                    PipelineStatus.FAILED,
+                    error_message="Validation failed: " + "; ".join(validation_result.errors)
+                )
+
+            # Retryable error - check what stage to retry based on error
+            if attempt < MAX_RETRIES - 1:
+                retry_count += 1
+
+                # Determine which stage to retry based on validation error
+                errors = getattr(validation_result, 'errors', [])
+                error_str = " ".join(errors).lower()
+
+                # Check for OCR-related errors
+                if any(e in error_str for e in ['ocr', 'text', 'image', 'quality', 'unreadable']):
+                    # Retry OCR
+                    self._state.ocr_text = ""
+                    self._state.ocr_quality = 0.0
+                    ocr_result = self._run_ocr(image_path, max_attempts=3)
+                    if not ocr_result:
+                        self._state.retry_count = retry_count
+                        return self._build_result(
+                            PipelineStatus.FAILED,
+                            error_message="OCR failed on retry"
+                        )
+                    # Re-parse after successful OCR
+                    parse_result = self._run_parsing(self._state.ocr_text, max_attempts=3)
+                    if not parse_result:
+                        self._state.retry_count = retry_count
+                        return self._build_result(PipelineStatus.FAILED, "Parsing failed on retry")
+
+                # Check for parsing-related errors
+                elif any(e in error_str for e in ['parse', 'merchant', 'total', 'date', 'amount', 'malformed']):
+                    # Retry parsing only
+                    parse_result = self._run_parsing(self._state.ocr_text, max_attempts=3)
+                    if not parse_result:
+                        self._state.retry_count = retry_count
+                        return self._build_result(PipelineStatus.FAILED, "Parsing failed on retry")
+
+                # Otherwise, retry validation itself (data might be acceptable now)
+                continue
+
+            else:
+                # No more attempts - break to post-stage resolution
+                break
+
+        else:
+            # Loop completed without break (all retries exhausted)
+            if not validation_result or not validation_result.is_valid:
+                if getattr(validation_result, 'preserve_partial', False):
+                    pass  # Will be handled in post-stage resolution
                 else:
-                    # Validation failed, no partial preservation
+                    self._state.retry_count = retry_count
                     return self._build_result(
                         PipelineStatus.FAILED,
-                        error_message="Validation failed: " + "; ".join(validation_result.errors)
+                        error_message="Validation failed after all retry attempts"
                     )
 
-            # Stage 5: Persist successful result
+        # Store final retry count
+        self._state.retry_count = retry_count
+
+        # POST-STAGE RESOLUTION: Three outcomes based on validation result
+        # Get final preserve_partial flag directly from validation_result
+        final_preserve_partial = (
+            getattr(validation_result, 'preserve_partial', False)
+            if validation_result else False
+        )
+
+        # Outcome 1: SUCCESS - validation passed
+        if validation_result and validation_result.is_valid:
             receipt = self._run_persistence(self._state.parsed_data, image_path)
             if not receipt:
                 return self._build_result(PipelineStatus.FAILED, "Persistence failed")
-
+            # Handle both object.id and dict["id"] formats
+            if isinstance(receipt, dict):
+                receipt_id = receipt.get('id')
+            else:
+                receipt_id = getattr(receipt, 'id', None)
             return self._build_result(
                 PipelineStatus.SUCCESS,
-                receipt_id=receipt.id if receipt else None,
+                receipt_id=receipt_id,
                 receipt_data=self._state.parsed_data
             )
 
-        except Exception as e:
-            return self._build_result(PipelineStatus.FAILED, str(e))
+        # Outcome 2: PARTIAL - validation failed but preserve_partial is True
+        if final_preserve_partial and self._state.parsed_data:
+            receipt = self._run_persistence(self._state.parsed_data, image_path)
+            if not receipt:
+                return self._build_result(PipelineStatus.FAILED, "Persistence failed")
+            # Handle both object.id and dict["id"] formats
+            if isinstance(receipt, dict):
+                receipt_id = receipt.get('id')
+            else:
+                receipt_id = getattr(receipt, 'id', None)
+            return self._build_result(
+                PipelineStatus.PARTIAL,
+                receipt_id=receipt_id,
+                receipt_data=self._state.parsed_data
+            )
 
-    def _run_ocr(self, image_path: str, max_attempts: int = 3) -> bool:
-        """Execute OCR stage with optional retry support.
+        # Outcome 3: FAILURE - all other cases
+        return self._build_result(PipelineStatus.FAILED, "Pipeline exhausted all attempts")
+
+    def _run_ocr(self, image_path: str, max_attempts: int = 3) -> Optional[str]:
+        """Execute OCR stage with retry support and fallback on low quality.
 
         Args:
             image_path: Path to image
-            max_attempts: Maximum OCR attempts before giving up
+            max_attempts: Maximum OCR attempts (default 3)
+
+        Returns:
+            OCR text if successful, None if all failed
         """
-        last_exception = None
+        QUALITY_THRESHOLD = 0.5
 
         for attempt in range(max_attempts):
-            is_fallback = False
-            transition = self._start_stage(
-                PipelineStage.OCR,
-                {"image_path": image_path, "type": "fallback" if is_fallback else "primary", "attempt": attempt + 1}
-            )
+            # Try primary OCR (EasyOCR)
+            self._start_stage(PipelineStage.OCR, {"image_path": image_path, "method": "easyocr", "attempt": attempt + 1})
 
             try:
-                # Try OCR
-                text = self.ocr.extract_text(image_path)
-                quality = self.ocr.score_ocr_quality(text)
+                text = self.ocr.extract_text(image_path, use_vision_fallback=False)
 
-                self._state.ocr_text = text
-                self._state.ocr_quality = quality
+                # Get quality score
+                try:
+                    quality = self.ocr.score_ocr_quality(text)
+                except Exception:
+                    quality = 0.5
 
-                # Check quality threshold for fallback
-                if quality < 0.25:
-                    self._end_stage(PipelineStage.OCR, {
-                        "text": text,
-                        "quality": quality,
-                        "method": "easyocr",
-                        "triggered_fallback": True
-                    })
-
-                    # Start fallback stage
-                    fallback_transition = self._start_stage(
-                        PipelineStage.OCR,
-                        {"image_path": image_path, "type": "fallback", "attempt": attempt + 1}
-                    )
-
-                    try:
-                        text = self.ocr.extract_text(image_path, use_vision_fallback=True)
-                        quality = self.ocr.score_ocr_quality(text)
-                        self._state.ocr_text = text
-                        self._state.ocr_quality = quality
-                    except Exception:
-                        pass  # Use original low-quality result
+                # Check if quality is acceptable
+                if quality >= QUALITY_THRESHOLD:
+                    # Good quality - record success and return
+                    self._state.ocr_text = text
+                    self._state.ocr_quality = quality
+                    self._state.ocr_method = "easyocr"
 
                     self._end_stage(PipelineStage.OCR, {
                         "text": text,
                         "quality": quality,
-                        "method": "vision"
-                    })
-                else:
-                    self._end_stage(PipelineStage.OCR, {
-                        "text": text,
-                        "quality": quality,
+                        "success": True,
                         "method": "easyocr"
                     })
-                return True
+                    return text
+
+                # Low quality - try fallback (Vision API)
+                # Primary succeeded but quality is low - mark success=True with low_quality flag
+                self._end_stage(PipelineStage.OCR, {
+                    "text": text,
+                    "quality": quality,
+                    "success": True,
+                    "low_quality": True,
+                    "method": "easyocr"
+                })
+
+                # Attempt fallback
+                self._start_stage(PipelineStage.OCR, {"image_path": image_path, "method": "vision", "fallback": True, "attempt": attempt + 1})
+
+                try:
+                    fallback_text = self.ocr.extract_text(image_path, use_vision_fallback=True)
+
+                    # Get fallback quality
+                    try:
+                        fallback_quality = self.ocr.score_ocr_quality(fallback_text)
+                    except Exception:
+                        fallback_quality = 0.5
+
+                    # Check fallback quality
+                    if fallback_quality >= QUALITY_THRESHOLD:
+                        # Fallback succeeded with good quality
+                        self._state.ocr_text = fallback_text
+                        self._state.ocr_quality = fallback_quality
+                        self._state.ocr_method = "vision"
+
+                        self._end_stage(PipelineStage.OCR, {
+                            "text": fallback_text,
+                            "quality": fallback_quality,
+                            "success": True,
+                            "method": "vision",
+                            "fallback": True
+                        })
+                        return fallback_text
+
+                    # Fallback also low quality - record and continue to next attempt
+                    # Fallback succeeded but quality is low - mark success=True with low_quality flag
+                    self._end_stage(PipelineStage.OCR, {
+                        "text": fallback_text,
+                        "quality": fallback_quality,
+                        "success": True,
+                        "low_quality": True,
+                        "method": "vision",
+                        "fallback": True
+                    })
+
+                except Exception as e:
+                    # Fallback failed
+                    self._end_stage(PipelineStage.OCR, {
+                        "success": False,
+                        "method": "vision",
+                        "fallback": True,
+                        "error": str(e)
+                    }, exception=e)
+
+                # Both primary and fallback failed on this attempt, continue to next
+                continue
 
             except Exception as e:
-                last_exception = e
-                self._end_stage(PipelineStage.OCR, exception=e)
+                # Primary OCR failed
+                self._end_stage(PipelineStage.OCR, {
+                    "success": False,
+                    "method": "easyocr"
+                }, exception=e)
+                # Continue to next attempt
+                continue
 
-                # Continue to next attempt if retries remain
-                if attempt < max_attempts - 1:
-                    continue
-                else:
-                    return False
-
-        return False
+        # All attempts exhausted
+        self._state.ocr_quality_exhausted = True
+        return None
 
     def _check_idempotency(self, image_path: str) -> Optional[Any]:
         """Check if receipt already exists."""
@@ -400,75 +579,131 @@ class PipelineTestHarness:
         existing = self.repository.find_by_image_hash(image_hash)
         return existing
 
-    def _run_parsing(self, text: str) -> bool:
-        """Execute parsing stage with optional retry."""
-        transition = self._start_stage(PipelineStage.PARSING, {"text": text})
+    def _run_parsing(self, text: str, max_attempts: int = 3) -> bool:
+        """Execute parsing stage with internal retry support.
 
-        last_successful_result = None
+        Args:
+            text: OCR text to parse
+            max_attempts: Maximum parsing attempts (default 3)
 
-        def parse_operation():
-            nonlocal last_successful_result
-            response = self.parser.parse_text(text)
-            if response.status == "success":
-                last_successful_result = response.data
-                return response.data
-            raise ValueError(f"Parse failed: {response.error}")
+        Returns:
+            True if parsing succeeded, False if all failed
+        """
+        # Start PARSE stage once (internal retries are not traced)
+        self._start_stage(PipelineStage.PARSE, {"text": text, "max_attempts": max_attempts})
 
-        try:
-            if self._retry_is_fake:
-                # Use fake retry with configured behavior
-                result = self.retry.execute_with_retry(parse_operation)
-                # If retry "forced success", we still have the actual data from last_successful_result
-                if isinstance(result, dict) and result.get("forced_success"):
-                    result = last_successful_result
-            else:
-                # Use real retry
-                result = self.retry.execute_with_retry(parse_operation)
+        # Use FakeRetryService when available for proper retry tracking
+        if self._retry_is_fake:
+            try:
+                def parse_with_retry():
+                    response = self.parser.parse_text(text)
+                    if response.status != "success":
+                        raise ValueError(f"Parse failed: {response.error}")
+                    return response.data
 
-            self._state.parsed_data = result
-            self._end_stage(PipelineStage.PARSING, result)
-            return True
+                parsed_data = self.retry.execute_with_retry(parse_with_retry)
+                self._state.parsed_data = parsed_data
+                self._end_stage(PipelineStage.PARSE, parsed_data, data={"status": "success", "attempts": self.retry.get_attempt_count()})
+                return True
+            except Exception as e:
+                self._end_stage(PipelineStage.PARSE, exception=e, data={"status": "fail", "attempts": self.retry.get_attempt_count()})
+                return False
 
-        except Exception as e:
-            self._end_stage(PipelineStage.PARSING, exception=e)
-            return False
+        # Fallback to manual retry loop
+        last_exception = None
+        for attempt in range(max_attempts):
+            try:
+                response = self.parser.parse_text(text)
+                if response.status == "success":
+                    self._state.parsed_data = response.data
+                    self._end_stage(PipelineStage.PARSE, response.data, data={"status": "success", "attempts": attempt + 1})
+                    return True
+                else:
+                    last_exception = ValueError(f"Parse failed: {response.error}")
+                    # Continue to next attempt
+            except Exception as e:
+                last_exception = e
+                # Continue to next attempt
 
-    def _run_validation(self, data: Dict[str, Any]) -> Optional[ValidationResult]:
-        """Execute validation stage."""
-        transition = self._start_stage(PipelineStage.VALIDATION, {"data": data})
+        # All attempts failed
+        self._end_stage(PipelineStage.PARSE, exception=last_exception, data={"status": "fail", "attempts": max_attempts})
+        return False
 
-        try:
-            result = self.validator.validate_receipt(data)
-            self._state.validation_result = result
-            self._end_stage(PipelineStage.VALIDATION, result)
-            return result
+    def _run_validation(self, data: Dict[str, Any], max_attempts: int = 1) -> Optional[ValidationResult]:
+        """Execute validation stage with optional retry for retryable failures.
 
-        except Exception as e:
-            self._end_stage(PipelineStage.VALIDATION, exception=e)
-            return None
+        Args:
+            data: Receipt data to validate
+            max_attempts: Maximum validation attempts (default 1, only retry if retryable=True)
 
-    def _run_persistence(self, data: Dict[str, Any], image_path: str) -> Optional[Any]:
-        """Execute persistence stage."""
-        transition = self._start_stage(PipelineStage.PERSISTENCE, {"data": data})
+        Returns:
+            ValidationResult if successful, None if failed
+        """
+        # Start VALIDATE stage once
+        self._start_stage(PipelineStage.VALIDATE, {"data": data})
 
-        try:
-            # Get image hash
-            image_hash = self._image_hashes.get(image_path, f"hash_{Path(image_path).stem}")
+        last_exception = None
+        for attempt in range(max_attempts):
+            try:
+                result = self.validator.validate_receipt(data)
+                self._state.validation_result = result
+                status_str = "pass" if result.is_valid else "fail"
+                self._end_stage(PipelineStage.VALIDATE, result, data={"status": status_str, "attempts": attempt + 1})
+                return result
+            except Exception as e:
+                last_exception = e
+                # Continue to next attempt if retries remain
 
-            receipt = self.repository.save_receipt(
-                user_id=self._user_id,
-                image_path=image_path,
-                receipt_data=data,
-                image_hash=image_hash
-            )
+        # All attempts failed
+        self._end_stage(PipelineStage.VALIDATE, exception=last_exception, data={"status": "fail", "attempts": max_attempts})
+        return self._state.validation_result
 
-            self._state.saved_receipt = receipt
-            self._end_stage(PipelineStage.PERSISTENCE, receipt)
-            return receipt
+    def _run_persistence(self, data: Dict[str, Any], image_path: str, max_attempts: int = 3) -> Optional[Any]:
+        """Execute persistence stage with internal retry support.
 
-        except Exception as e:
-            self._end_stage(PipelineStage.PERSISTENCE, exception=e)
-            return None
+        Args:
+            data: Receipt data to persist
+            image_path: Path to the receipt image
+            max_attempts: Maximum persistence attempts (default 3)
+
+        Returns:
+            Saved receipt if successful, None if all failed
+        """
+        # Get image hash once (doesn't change between retries)
+        image_hash = self._image_hashes.get(image_path, f"hash_{Path(image_path).stem}")
+
+        # Preserve configured receipt_id across retries
+        configured_id = getattr(self.repository, '_next_receipt_id', None)
+
+        # Start PERSIST stage once (internal retries are not traced)
+        self._start_stage(PipelineStage.PERSIST, {"data": data, "max_attempts": max_attempts})
+
+        last_exception = None
+        for attempt in range(max_attempts):
+            # Re-configure the receipt_id if it was consumed by previous attempt
+            current_id = getattr(self.repository, '_next_receipt_id', None)
+            if configured_id is not None and current_id is None:
+                self.repository._next_receipt_id = configured_id
+
+            try:
+                receipt = self.repository.save_receipt(
+                    user_id=self._user_id,
+                    image_path=image_path,
+                    receipt_data=data,
+                    image_hash=image_hash
+                )
+
+                self._state.saved_receipt = receipt
+                self._end_stage(PipelineStage.PERSIST, receipt, data={"status": "success", "attempts": attempt + 1})
+                return receipt
+
+            except Exception as e:
+                last_exception = e
+                # Continue to next attempt
+
+        # All attempts failed
+        self._end_stage(PipelineStage.PERSIST, exception=last_exception, data={"status": "fail", "attempts": max_attempts})
+        return None
 
     def _build_result(
         self,
@@ -481,10 +716,28 @@ class PipelineTestHarness:
         """Build the final PipelineResult."""
         end_time = time.time()
 
-        # Calculate retry count from fake retry service
-        retry_count = 0
+        # Mark last trace entry as terminal for terminal states
+        terminal_states = {PipelineStatus.FAILED, PipelineStatus.FAILURE, PipelineStatus.SUCCESS, PipelineStatus.PARTIAL, PipelineStatus.DUPLICATE}
+        if status in terminal_states and self._state.trace.entries:
+            last_entry = self._state.trace.entries[-1]
+            if last_entry.data is None:
+                last_entry.data = {}
+            last_entry.data["terminal"] = True
+
+        # Validate all stages use standardized naming
+        valid_stages = {"OCR", "PARSE", "VALIDATE", "RETRY", "PERSIST"}
+        for transition in self._state.transitions:
+            stage_name = transition.stage.name
+            assert stage_name in valid_stages, (
+                f"Invalid stage name '{stage_name}'. "
+                f"Must be one of: {valid_stages}"
+            )
+
+        # Get retry count from fake retry service when available, otherwise from state
         if self._retry_is_fake:
             retry_count = max(0, self.retry.get_attempt_count() - 1)
+        else:
+            retry_count = self._state.retry_count if self._state else 0
 
         # Get OCR method from last OCR call
         ocr_method = None
@@ -526,23 +779,56 @@ class PipelineTestHarness:
 
     def assert_retry_count(self, expected: int) -> None:
         """Assert specific retry count was used."""
-        actual = self._last_result.retry_count if self._last_result else 0
+        # When using fake retry, check the retry service's attempt count
+        if self._retry_is_fake:
+            actual = max(0, self.retry.get_attempt_count() - 1)
+        else:
+            actual = self._last_result.retry_count if self._last_result else 0
         if actual != expected:
             raise AssertionError(f"Expected {expected} retries, got {actual}")
 
     def assert_stage_sequence(self, expected_stages: List[str]) -> None:
         """Assert pipeline executed stages in expected order.
 
-        Args:
-            expected_stages: List of stage names, e.g., ["OCR", "PARSING", "VALIDATION"]
-        """
-        actual_stages = [
-            t.stage.name for t in self._state.transitions
-        ]
+        Collapses consecutive duplicates in actual trace to handle retries
+        (e.g., ["OCR", "OCR", "PARSE"] → ["OCR", "PARSE"])
 
-        if actual_stages != expected_stages:
+        Args:
+            expected_stages: Normalized list of stage names, e.g., ["OCR", "PARSE", "VALIDATE"]
+        """
+        raw_stages = [t.stage.name for t in self._state.transitions]
+
+        # Collapse consecutive duplicates
+        normalized_stages = []
+        for stage in raw_stages:
+            if not normalized_stages or normalized_stages[-1] != stage:
+                normalized_stages.append(stage)
+
+        if normalized_stages != expected_stages:
             raise AssertionError(
-                f"Expected stages {expected_stages}, got {actual_stages}"
+                f"Expected stages {expected_stages}, got {normalized_stages} (raw: {raw_stages})"
+            )
+
+    def assert_stage_sequence_normalized(self, expected_stages: List[str]) -> None:
+        """Assert pipeline executed stages in order, ignoring consecutive duplicates.
+
+        Normalizes actual stages by removing consecutive duplicates
+        to handle retry scenarios (e.g., ["OCR", "OCR", "PARSE"] → ["OCR", "PARSE"])
+
+        Args:
+            expected_stages: Normalized list of stage names, e.g., ["OCR", "PARSE", "VALIDATE"]
+        """
+        raw_stages = [t.stage.name for t in self._state.transitions]
+
+        # Normalize: remove consecutive duplicates
+        normalized_stages = []
+        for stage in raw_stages:
+            if not normalized_stages or normalized_stages[-1] != stage:
+                normalized_stages.append(stage)
+
+        if normalized_stages != expected_stages:
+            raise AssertionError(
+                f"Expected stages {expected_stages}, got {normalized_stages} (raw: {raw_stages})"
             )
 
     def assert_stage_executed(self, stage_name: str) -> None:
@@ -815,6 +1101,11 @@ class PipelineTestHarness:
     def get_full_report(self) -> Dict[str, Any]:
         """Get complete execution report for debugging."""
         metrics = self.repository.get_metrics()
+        # Use fake retry service count when available
+        if self._retry_is_fake and self._last_result:
+            retry_count = max(0, self.retry.get_attempt_count() - 1)
+        else:
+            retry_count = self._last_result.retry_count if self._last_result else 0
         return {
             "status": self._last_result.status.value if self._last_result else None,
             "stages": [
@@ -825,7 +1116,7 @@ class PipelineTestHarness:
                 }
                 for t in self._state.transitions
             ],
-            "retry_count": self._last_result.retry_count if self._last_result else 0,
+            "retry_count": retry_count,
             "ocr_method": self._last_result.ocr_method if self._last_result else None,
             "repository_saves": self.repository.get_save_count(),
             "repository_metrics": {

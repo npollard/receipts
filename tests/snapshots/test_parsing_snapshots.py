@@ -166,11 +166,17 @@ class TestNoisyOCRReceiptParsing:
         helper = SnapshotHelper()
 
         # Low quality OCR (simulating blurry image)
-        harness.ocr.set_text_for_image(
-            "receipt.jpg",
-            "C0rn3r C@fe\n03/10/2024\nC0ffee $3.50\nB@gel $2.25\nTax $0.46\nTotal $6.21",
-            quality=0.35  # Low quality triggers cleanup/fallback
-        )
+        # Provide sequence for fallback and potential retries
+        harness.ocr.set_sequence([
+            OCROutput(
+                text="C0rn3r C@fe\n03/10/2024\nC0ffee $3.50\nB@gel $2.25\nTax $0.46\nTotal $6.21",
+                quality_score=0.35
+            ),
+            OCROutput(
+                text="Corner Cafe\n03/10/2024\nCoffee $3.50\nBagel $2.25\nTax $0.46\nTotal $6.21",
+                quality_score=0.75
+            ),
+        ])
         harness.parser.set_parse_result(
             merchant="Corner Cafe",
             total=6.21,

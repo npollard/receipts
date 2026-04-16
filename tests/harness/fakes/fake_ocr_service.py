@@ -146,6 +146,56 @@ class FakeOCRService(FakeComponent):
         self._sequence_index = 0
         return self
 
+    def set_failure(self, image_path: str, error: str) -> "FakeOCRService":
+        """Configure specific image to fail with error.
+
+        Integrates with sequence logic - adds exception to outputs.
+
+        Args:
+            image_path: Path to image that should fail
+            error: Error message/code
+
+        Returns:
+            Self for chaining
+        """
+        self._image_outputs[image_path] = Exception(error)
+        return self
+
+    def set_always_fail(self, error: str) -> "FakeOCRService":
+        """Configure all images to fail with given error.
+
+        Creates a sequence that always raises the error.
+
+        Args:
+            error: Error message/code to raise
+
+        Returns:
+            Self for chaining
+        """
+        self._should_fail = True
+        self._failure_exception = Exception(error)
+        self._max_attempts_before_success = 0  # Never succeed
+        return self
+
+    def set_always_low_quality(self, text: str, quality: float) -> "FakeOCRService":
+        """Configure all images to return low quality output.
+
+        Useful for testing fallback triggers.
+
+        Args:
+            text: Text to return
+            quality: Low quality score (typically < 0.3)
+
+        Returns:
+            Self for chaining
+        """
+        self._default_output = OCROutput(
+            text=text,
+            quality_score=quality,
+            method="easyocr"
+        )
+        return self
+
     def get_attempt_history(self) -> list:
         """Get detailed history of all attempts.
 
