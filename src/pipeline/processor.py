@@ -80,8 +80,19 @@ class Processor:
         parser=None,
         validator=None,
         repository=None,
-        retry_service=None
+        retry_service=None,
+        image_processor=None,
+        receipt_parser=None,
+        db_manager=None
     ):
+        # Map legacy parameter names for backwards compatibility
+        if ocr_service is None and image_processor is not None:
+            ocr_service = image_processor
+        if parser is None and receipt_parser is not None:
+            parser = receipt_parser
+        if repository is None and db_manager is not None:
+            repository = db_manager
+
         # Initialize defaults for any None dependencies
         if ocr_service is None:
             from services.ocr_service import OCRService
@@ -107,6 +118,35 @@ class Processor:
         self.token_usage = TokenUsage()
 
         self.trace = []
+
+        # User context for backwards compatibility
+        self._user_context = {"email": "default@example.com", "user_id": "default"}
+
+    # -----------------------------
+    # User Management (backwards compatibility)
+    # -----------------------------
+
+    def switch_user(self, email: str):
+        """Switch to a different user context."""
+        self._user_context["email"] = email
+        # Extract user_id from email or use email as user_id
+        self._user_context["user_id"] = email
+        # Update repository user_id if it has one
+        if hasattr(self.repository, 'user_id'):
+            self.repository.user_id = email
+        # Also try setter method if available
+        if hasattr(self.repository, 'set_user_id'):
+            self.repository.set_user_id(email)
+
+    def get_user_context(self) -> dict:
+        """Get current user context."""
+        # If repository has user context, use that
+        if hasattr(self.repository, 'user_id'):
+            return {
+                "email": self.repository.user_id,
+                "user_id": self.repository.user_id
+            }
+        return self._user_context
 
     # -----------------------------
     # Public API
@@ -380,18 +420,34 @@ def process_single_image(image_path: str, ocr_service, parser, validator, reposi
 
 def validate_and_get_image_files(paths):
     import os
+    from pathlib import Path
 
-    if isinstance(paths, str):
+    # Handle single path (string or Path object)
+    if isinstance(paths, (str, Path)):
         paths = [paths]
 
     valid_extensions = {".png", ".jpg", ".jpeg", ".webp"}
 
-    return [
-        p for p in paths
-        if isinstance(p, str)
-        and os.path.exists(p)
-        and os.path.splitext(p)[1].lower() in valid_extensions
-    ]
+    # Collect all image files
+    image_files = []
+    for p in paths:
+        # Convert to Path object if string
+        path_obj = Path(p) if isinstance(p, str) else p
+
+        if not path_obj.exists():
+            continue
+
+        # If it's a directory, scan for images
+        if path_obj.is_dir():
+            for ext in valid_extensions:
+                image_files.extend(path_obj.glob(f"*{ext}"))
+                image_files.extend(path_obj.glob(f"*{ext.upper()}"))
+        # If it's a file with valid extension, add it
+        elif path_obj.is_file() and path_obj.suffix.lower() in valid_extensions:
+            image_files.append(path_obj)
+
+    # Return list of strings for compatibility
+    return [str(p) for p in image_files]
 
 
 # -----------------------------

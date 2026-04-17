@@ -364,9 +364,14 @@ class BatchProcessingService(BatchProcessingInterface):
 
         return results
 
-    def _print_processing_header(self, image_path: Path) -> None:
+    def _print_processing_header(self, image_path) -> None:
         """Print structured header before processing a receipt"""
-        filename = image_path.name
+        from pathlib import Path
+        # Handle both Path objects and strings
+        if isinstance(image_path, str):
+            filename = Path(image_path).name
+        else:
+            filename = image_path.name
         print(f"\n{'='*60}")
         print(f"PROCESSING: {filename}")
         print(f"{'='*60}")
