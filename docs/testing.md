@@ -18,5 +18,5 @@ python -m pytest tests/integration/ -v
 ```bash
 python -m pytest tests/test_api_response.py -v
 python -m pytest tests/test_models.py -v
-python -m pytest tests/services/ocr/test_ocr_scoring.py -v
+python -m pytest tests/services/ocr/test_scoring.py -v
 ```

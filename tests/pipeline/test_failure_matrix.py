@@ -283,7 +283,7 @@ class TestScenario12UnrecoverableParse:
     def test_unrecoverable_parse(self):
         """OCR(gibberish) → PARSE(malformed) → RETRY(reparse) → PARSE(malformed) → failure"""
         result = Scenario().with_image("receipt.jpg") \
-            .ocr(success(text="@#\$%^&*() random", quality=0.30)) \
+            .ocr(success(text="@#$%^&*() random", quality=0.30)) \
             .parse(
                 failure(error="unparseable"),
                 failure(error="still_unparseable")
