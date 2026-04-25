@@ -8,7 +8,7 @@ from api_response import APIResponse
 from tracking import TokenUsage
 
 if TYPE_CHECKING:
-    from domain.parsing.receipt_parser import ParsingResult
+    from domain.parsing.parsing_result import ParsingResult
     from services.batch_service import BatchObservability
 
 

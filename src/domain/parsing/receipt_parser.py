@@ -1,7 +1,6 @@
 """Core receipt parsing functionality"""
 
 from typing import Callable, Dict, Any, Optional
-from dataclasses import dataclass
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
@@ -12,13 +11,14 @@ from api_response import APIResponse
 from tracking import TokenUsage, extract_token_usage
 from domain.validation.validation_service import ValidationService
 from domain.validation.validation_utils import validate_response_content, validate_with_pydantic
+from domain.parsing.parsing_result import ParsingResult
+from domain.parsing.retry_strategies import ParserRetryStrategies
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from services.retry_service import RetryService
 from core.logging import get_parser_logger
 from contracts.interfaces import ImageProcessingInterface
-from prompts.retry_prompts import get_llm_fix_prompt, get_rag_prompt, get_vision_reparse_prompt
 
 logger = get_parser_logger(__name__)
 
@@ -27,19 +27,6 @@ def create_default_llm(model_name: str, temperature: float) -> LanguageModelInte
     from infrastructure.llm import create_openai_chat_llm
 
     return create_openai_chat_llm(model_name=model_name, temperature=temperature)
-
-
-@dataclass
-class ParsingResult:
-    """Structured result that preserves parsed data even on validation failure"""
-    parsed: Optional[Receipt] = None
-    valid: bool = False
-    error: Optional[str] = None
-    token_usage: TokenUsage = None
-
-    def __post_init__(self):
-        if self.token_usage is None:
-            self.token_usage = TokenUsage()
 
 
 class ReceiptParser(ReceiptParsingInterface):
@@ -82,253 +69,25 @@ Expected JSON format:
         logger.debug(f"Initialized ReceiptParser with model: {model_name}")
 
     def _classify_validation_error(self, error_message: str) -> Dict[str, Any]:
-        """Classify validation error severity and extract mismatch amount"""
-        import re
-        from decimal import Decimal
-
-        # Default classification
-        severity = "unknown"
-        mismatch_amount = None
-
-        # Look for total mismatch patterns
-        total_mismatch_pattern = r'Total ([\d.,]+) does not match sum of items ([\d.,]+)'
-        match = re.search(total_mismatch_pattern, error_message)
-
-        if match:
-            try:
-                total = Decimal(match.group(1).replace(',', '.'))
-                items_sum = Decimal(match.group(2).replace(',', '.'))
-                mismatch_amount = abs(total - items_sum)
-
-                # Classify severity based on mismatch amount
-                if mismatch_amount < Decimal('1.00'):
-                    severity = "small"
-                elif mismatch_amount <= Decimal('5.00'):
-                    severity = "medium"
-                else:
-                    severity = "large"
-
-            except (ValueError, TypeError):
-                pass
-        else:
-            # Other validation errors
-            if "missing" in error_message.lower():
-                severity = "medium"
-            elif "invalid" in error_message.lower():
-                severity = "small"
-            else:
-                severity = "unknown"
-
-        return {
-            "severity": severity,
-            "mismatch_amount": float(mismatch_amount) if mismatch_amount else None,
-            "error_message": error_message
-        }
+        return self._retry_strategies().classify_validation_error(error_message)
 
     def _llm_self_correction_retry(self, original_text: str, previous_result: dict, error_info: dict) -> ParsingResult:
-        """Implement LLM self-correction retry strategy"""
-        logger.debug(f"Attempting LLM self-correction retry for {error_info['severity']} error")
-        self.current_retries.append("LLM_SELF_CORRECTION")
-
-        result = ParsingResult()
-
-        # Use template for self-correction prompt
-        correction_prompt = get_llm_fix_prompt(
-            error_info['error_message'],
-            original_text,
-            previous_result
-        )
-
-        try:
-            messages = [
-                SystemMessage(content=self._system_prompt),
-                HumanMessage(content=correction_prompt)
-            ]
-
-            response = self.llm.invoke(messages)
-            input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-            logger.debug(f"LLM self-correction retry - Token usage - Input: {input_tokens}, Output: {output_tokens}")
-            result.token_usage.add_usage(input_tokens, output_tokens)
-            self.token_usage.add_usage(input_tokens, output_tokens)
-
-            # Validate corrected response
-            parsed_response = validate_response_content(response)
-            if parsed_response.status == "failed":
-                # Preserve parsed data even if validation failed
-                if parsed_response.data:
-                    result.parsed = parsed_response.data
-                result.error = f"Self-correction failed: {parsed_response.error}"
-                return result
-
-            validated_response = validate_with_pydantic(
-                parsed_response.data,
-                input_tokens,
-                output_tokens
-            )
-
-            if validated_response.status == "failed":
-                # Preserve parsed data even if validation failed
-                result.parsed = parsed_response.data
-                result.error = f"Self-correction validation failed: {validated_response.error}"
-                return result
-
-            logger.debug("LLM self-correction retry successful")
-            result.parsed = validated_response.data
-            result.valid = True
-            result.error = None
-            return result
-
-        except Exception as e:
-            logger.error(f"LLM self-correction retry failed: {str(e)}")
-            result.error = f"LLM self-correction failed: {str(e)}"
-            return result
+        return self._retry_strategies().llm_self_correction_retry(original_text, previous_result, error_info)
 
     def _rag_retry_with_focused_context(self, original_text: str, error_info: dict) -> ParsingResult:
-        """Implement RAG retry with focused context extraction"""
-        logger.debug(f"Attempting RAG retry with focused context for {error_info['severity']} error")
-        self.current_retries.append("RAG_FOCUSED_CONTEXT")
-
-        result = ParsingResult()
-
-        # Extract relevant lines from OCR text
-        import re
-        lines = original_text.split('\n')
-        focused_lines = []
-
-        # Patterns to identify relevant lines
-        patterns = [
-            r'.*TOTAL.*',
-            r'.*AMOUNT.*',
-            r'.*BALANCE.*',
-            r'.*\$?\d+\.\d{2}.*',
-            r'.*\d+\.\d{2}.*'
-        ]
-
-        for line in lines:
-            line = line.strip()
-            if any(re.search(pattern, line, re.IGNORECASE) for pattern in patterns):
-                focused_lines.append(line)
-
-        # If no focused lines found, use first and last few lines
-        if not focused_lines:
-            focused_lines = lines[:3] + lines[-3:] if len(lines) > 6 else lines
-
-        focused_context = '\n'.join(focused_lines)
-
-        # Use template for RAG prompt
-        rag_prompt = get_rag_prompt(focused_context, original_text)
-
-        try:
-            messages = [
-                SystemMessage(content=self._system_prompt),
-                HumanMessage(content=rag_prompt)
-            ]
-
-            response = self.llm.invoke(messages)
-            input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-            logger.debug(f"RAG retry - Token usage - Input: {input_tokens}, Output: {output_tokens}")
-            result.token_usage.add_usage(input_tokens, output_tokens)
-            self.token_usage.add_usage(input_tokens, output_tokens)
-
-            # Validate RAG response
-            parsed_response = validate_response_content(response)
-            if parsed_response.status == "failed":
-                # Preserve parsed data even if validation failed
-                if parsed_response.data:
-                    result.parsed = parsed_response.data
-                result.error = f"RAG retry failed: {parsed_response.error}"
-                return result
-
-            validated_response = validate_with_pydantic(
-                parsed_response.data,
-                input_tokens,
-                output_tokens
-            )
-
-            if validated_response.status == "failed":
-                # Preserve parsed data even if validation failed
-                result.parsed = parsed_response.data
-                result.error = f"RAG validation failed: {validated_response.error}"
-                return result
-
-            logger.debug("RAG retry successful")
-            result.parsed = validated_response.data
-            result.valid = True
-            result.error = None
-            return result
-
-        except Exception as e:
-            logger.error(f"RAG retry failed: {str(e)}")
-            result.error = f"RAG retry failed: {str(e)}"
-            return result
+        return self._retry_strategies().rag_retry_with_focused_context(original_text, error_info)
 
     def _ocr_fallback_retry(self, image_path: str, error_info: dict) -> ParsingResult:
-        """Implement OCR fallback retry using Vision OCR"""
-        result = ParsingResult()
+        return self._retry_strategies().ocr_fallback_retry(image_path, error_info)
 
-        if self.ocr_service is None:
-            result.error = "OCR service not available for fallback"
-            return result
-
-        logger.debug(f"Attempting OCR fallback retry for {error_info['severity']} error")
-        self.current_retries.append("OCR_FALLBACK")
-
-        try:
-            # Use Vision OCR as fallback
-            fallback_text = self.ocr_service.extract_text(image_path, use_vision_fallback=True)
-
-            if not fallback_text or fallback_text.strip() == "":
-                result.error = "OCR fallback returned empty text"
-                return result
-
-            logger.debug(f"OCR fallback extracted {len(fallback_text)} characters")
-
-            # Use template for Vision reparse prompt
-            vision_prompt = get_vision_reparse_prompt(fallback_text)
-
-            # Parse fallback OCR text
-            messages = [
-                SystemMessage(content=self._system_prompt),
-                HumanMessage(content=vision_prompt)
-            ]
-
-            response = self.llm.invoke(messages)
-            input_tokens, output_tokens, total_tokens = extract_token_usage(response)
-            logger.debug(f"OCR fallback - Token usage - Input: {input_tokens}, Output: {output_tokens}")
-            result.token_usage.add_usage(input_tokens, output_tokens)
-            self.token_usage.add_usage(input_tokens, output_tokens)
-
-            # Validate fallback response
-            parsed_response = validate_response_content(response)
-            if parsed_response.status == "failed":
-                # Preserve parsed data even if validation failed
-                if parsed_response.data:
-                    result.parsed = parsed_response.data
-                result.error = f"OCR fallback parsing failed: {parsed_response.error}"
-                return result
-
-            validated_response = validate_with_pydantic(
-                parsed_response.data,
-                input_tokens,
-                output_tokens
-            )
-
-            if validated_response.status == "failed":
-                # Preserve parsed data even if validation failed
-                result.parsed = parsed_response.data
-                result.error = f"OCR fallback validation failed: {validated_response.error}"
-                return result
-
-            logger.debug("OCR fallback retry successful")
-            result.parsed = validated_response.data
-            result.valid = True
-            result.error = None
-            return result
-
-        except Exception as e:
-            logger.error(f"OCR fallback retry failed: {str(e)}")
-            result.error = f"OCR fallback failed: {str(e)}"
-            return result
+    def _retry_strategies(self) -> ParserRetryStrategies:
+        return ParserRetryStrategies(
+            llm=self.llm,
+            system_prompt=self._system_prompt,
+            token_usage=self.token_usage,
+            current_retries=self.current_retries,
+            ocr_service=self.ocr_service,
+        )
 
     def parse_with_validation_driven_retry(self, ocr_text: str, image_path: str = None) -> ParsingResult:
         """Main parsing method with validation-driven retry strategy
