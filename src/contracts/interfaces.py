@@ -50,6 +50,15 @@ class ReceiptParsingInterface(ABC):
         pass
 
 
+class LanguageModelInterface(ABC):
+    """Interface for chat model invocation."""
+
+    @abstractmethod
+    def invoke(self, messages: List[Any]) -> Any:
+        """Invoke the model with chat messages."""
+        pass
+
+
 class BatchProcessingInterface(ABC):
     """Interface for batch processing operations"""
 

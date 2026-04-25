@@ -1,34 +1,32 @@
 """Core receipt parsing functionality"""
 
-import json
-import os
-from decimal import Decimal
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional
 from dataclasses import dataclass
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
-from contracts.interfaces import ReceiptParsingInterface
+from contracts.interfaces import LanguageModelInterface, ReceiptParsingInterface
 from domain.models.receipt import Receipt
 from api_response import APIResponse
 from tracking import TokenUsage, extract_token_usage
 from domain.validation.validation_service import ValidationService
-from domain.validation.validation_utils import validate_response_content, validate_with_pydantic, handle_validation_error
+from domain.validation.validation_utils import validate_response_content, validate_with_pydantic
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from services.retry_service import RetryService
 from core.logging import get_parser_logger
-from core.exceptions import (
-    ParsingError, ValidationError as CustomValidationError,
-    AIModelError, TokenUsageError
-)
 from contracts.interfaces import ImageProcessingInterface
 from prompts.retry_prompts import get_llm_fix_prompt, get_rag_prompt, get_vision_reparse_prompt
 
 logger = get_parser_logger(__name__)
+
+
+def create_default_llm(model_name: str, temperature: float) -> LanguageModelInterface:
+    from infrastructure.llm import create_openai_chat_llm
+
+    return create_openai_chat_llm(model_name=model_name, temperature=temperature)
 
 
 @dataclass
@@ -49,12 +47,11 @@ class ReceiptParser(ReceiptParsingInterface):
 
     def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.0,
                  ocr_service: ImageProcessingInterface = None,
-                 retry_service: 'RetryService' = None):
-        self.llm = ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            api_key=os.environ.get("OPENAI_API_KEY")
-        )
+                 retry_service: 'RetryService' = None,
+                 llm: Optional[LanguageModelInterface] = None,
+                 llm_factory: Optional[Callable[..., LanguageModelInterface]] = None):
+        factory = llm_factory or create_default_llm
+        self.llm = llm or factory(model_name=model_name, temperature=temperature)
         self.validation_service = ValidationService()
         self.retry_service = retry_service  # Injected, for retry orchestration
         self.token_usage = TokenUsage()
