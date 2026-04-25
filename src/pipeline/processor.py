@@ -1,9 +1,8 @@
-import inspect
-from decimal import Decimal
 from typing import Any, Optional
 
-from api_response import APIResponse
-from domain.models.receipt import Receipt
+from pipeline.duplicate_detector import DuplicateDetector
+from pipeline.persistence_gateway import ReceiptPersistenceGateway
+from pipeline.receipt_data_mapper import ReceiptDataMapper
 from services.retry_service import RetryService
 from tracking.usage import TokenUsage
 
@@ -120,6 +119,9 @@ class Processor:
         self.repository = repository
         self.retry_service = retry_service or RetryService(max_retries=3)
         self.token_usage = TokenUsage()
+        self.receipt_data_mapper = ReceiptDataMapper()
+        self.duplicate_detector = DuplicateDetector(repository)
+        self.persistence_gateway = ReceiptPersistenceGateway(repository)
 
         self.trace = []
 
@@ -346,20 +348,11 @@ class Processor:
         try:
             receipt_data = self._extract_receipt_data(parsed)
 
-            if hasattr(self.repository, 'save_receipt'):
-                saved = self.retry_service.execute_with_retry(
-                    self._save_receipt,
-                    receipt_data,
-                    error_types=(Exception,),
-                )
-            elif hasattr(self.repository, 'save'):
-                saved = self.retry_service.execute_with_retry(
-                    self.repository.save,
-                    receipt_data,
-                    error_types=(Exception,),
-                )
-            else:
-                raise AttributeError("Repository has no save method")
+            saved = self.retry_service.execute_with_retry(
+                self._save_receipt,
+                receipt_data,
+                error_types=(Exception,),
+            )
 
             receipt_id = self._extract_id(saved)
             result.data = parsed
@@ -387,76 +380,32 @@ class Processor:
     # -----------------------------
 
     def _extract_id(self, saved: Any) -> Optional[str]:
-        if saved is None:
-            return None
-        if isinstance(saved, tuple) and saved:
-            return self._extract_id(saved[0])
-        if isinstance(saved, dict):
-            return saved.get("id")
-        return getattr(saved, "id", None)
+        return self.persistence_gateway.extract_id(saved)
 
     def _record_trace(self, stage: str, success: bool, data: Optional[dict] = None):
         self.trace.append(TraceEntry(stage, success, data))
 
     def _compute_hash(self, image_path: str) -> str:
-        from core.hashing import calculate_image_hash
-        return calculate_image_hash(image_path)
+        return self.duplicate_detector.compute_hash(image_path)
 
     def _find_existing_receipt(self, image_path: str, image_hash: str) -> Optional[Any]:
-        if hasattr(self.repository, "find_by_image_hash"):
-            return self.repository.find_by_image_hash(image_hash)
-        if hasattr(self.repository, "find_by_hash"):
-            return self.repository.find_by_hash(image_hash)
-        if hasattr(self.repository, "find_existing_receipt_by_image_hash"):
-            return self.repository.find_existing_receipt_by_image_hash(image_path)
-        return None
+        return self.duplicate_detector.find_existing(image_path, image_hash)
 
     def _extract_receipt_data(self, parsed: Any) -> Any:
-        if hasattr(parsed, 'parsed'):
-            receipt_data = parsed.parsed
-        elif hasattr(parsed, 'receipt_data'):
-            receipt_data = parsed.receipt_data
-        else:
-            receipt_data = parsed
-
-        if hasattr(receipt_data, "model_dump"):
-            receipt_data = receipt_data.model_dump()
-        return self._to_plain_data(receipt_data)
+        return self.receipt_data_mapper.extract(parsed)
 
     def _to_plain_data(self, value: Any) -> Any:
-        if isinstance(value, Decimal):
-            return float(value)
-        if isinstance(value, dict):
-            return {key: self._to_plain_data(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [self._to_plain_data(item) for item in value]
-        return value
+        return self.receipt_data_mapper.to_plain_data(value)
 
     def _save_receipt(self, receipt_data: Any) -> Any:
-        save_receipt = self.repository.save_receipt
-        params = inspect.signature(save_receipt).parameters
         image_path = getattr(self, "_last_image_path", "unknown")
         image_hash = getattr(self, "_last_image_hash", self._compute_hash(image_path))
-        user_id = getattr(self.repository, "user_id", "default")
-
-        if "user_id" in params:
-            return save_receipt(
-                user_id=user_id,
-                image_path=image_path,
-                receipt_data=receipt_data,
-                image_hash=image_hash,
-            )
-
-        receipt_model = receipt_data if isinstance(receipt_data, Receipt) else Receipt.model_validate(receipt_data)
-        parsed_response = APIResponse.success(receipt_model)
-        token_usage = getattr(getattr(self, "token_usage", None), "input_tokens", 0)
-        output_tokens = getattr(getattr(self, "token_usage", None), "output_tokens", 0)
-        return save_receipt(
+        return self.persistence_gateway.save(
+            receipt_data=receipt_data,
             image_path=image_path,
+            image_hash=image_hash,
             ocr_text=getattr(self, "_last_ocr_text", "") or "",
-            parsed_response=parsed_response,
-            input_tokens=token_usage,
-            output_tokens=output_tokens,
+            token_usage=self.token_usage,
         )
 
 # -----------------------------
