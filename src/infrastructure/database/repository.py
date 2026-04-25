@@ -1,6 +1,7 @@
 """Unified repository layer for receipt persistence operations"""
 
 import logging
+import os
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional, Dict, Any, List, Union, Tuple
@@ -164,9 +165,21 @@ class ReceiptRepository:
         self.database_url = database_url
 
     def find_by_hash(self, image_hash: str) -> Optional[ReceiptDTO]:
-        """Alias for find_existing_receipt_by_image_hash for Processor compatibility."""
-        # The image_hash parameter is actually the image_path in the current implementation
-        return self.find_existing_receipt_by_image_hash(image_hash)
+        """Find an existing receipt by precomputed image hash."""
+        with get_read_session(self.database_url) as session:
+            receipt = session.query(Receipt).filter(
+                Receipt.user_id == self._user_id_for_db,
+                Receipt.receipt_hash == image_hash
+            ).first()
+
+            if receipt:
+                logger.info(f"Found duplicate receipt by image hash: {receipt.id}")
+                from .mappers import receipt_to_dto
+                return receipt_to_dto(receipt)
+
+        if os.path.sep in image_hash or os.path.exists(image_hash):
+            return self.find_existing_receipt_by_image_hash(image_hash)
+        return None
 
     def find_existing_receipt_by_image_hash(self, image_path: str) -> Optional[ReceiptDTO]:
         """Check if receipt already exists by image hash"""
@@ -435,5 +448,3 @@ class ReceiptRepository:
             receipts = query.offset(offset).limit(limit).all()
             from .mappers import receipt_to_dto
             return [receipt_to_dto(r) for r in receipts]
-
-

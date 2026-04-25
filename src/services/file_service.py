@@ -40,17 +40,6 @@ class FileHandlingService(FileHandlingInterface):
         """Get list of image files from directory"""
         return get_image_files(directory)
 
-    def enrich_result_with_metadata(self, result: APIResponse, metadata: Dict[str, Any]) -> APIResponse:
-        """Enrich API response with additional metadata"""
-        enriched_data = result.data.copy() if result.data else {}
-        enriched_data.update(metadata)
-
-        return APIResponse(
-            status=result.status,
-            data=enriched_data,
-            error=result.error
-        )
-
     def validate_and_get_image_files(self, imgs_dir: Path) -> List[Path]:
         """Validate and get list of image files to process"""
         if not imgs_dir.exists():

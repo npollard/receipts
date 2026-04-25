@@ -1,6 +1,8 @@
 """Unit tests for TokenUsage"""
 
 import pytest
+from api_response import APIResponse
+from services.token_service import TokenUsageService
 from tracking import TokenUsage
 
 
@@ -88,3 +90,32 @@ def test_token_usage_get_estimated_cost():
 
     # Expected: (1000/1000 * 0.15) + (500/1000 * 0.60) = 0.15 + 0.30 = 0.45
     assert abs(cost - 0.45) < 0.001
+
+
+def test_token_usage_service_extracts_usage_from_response_data():
+    service = TokenUsageService()
+    result = APIResponse.success({
+        "_token_usage": {
+            "input_tokens": 12,
+            "output_tokens": 8,
+            "total_tokens": 20,
+        }
+    })
+
+    assert service.extract_token_usage_from_result(result) == {
+        "input_tokens": 12,
+        "output_tokens": 8,
+        "total_tokens": 20,
+    }
+
+
+def test_token_usage_service_derives_total_when_missing():
+    service = TokenUsageService()
+    result = APIResponse.success({
+        "_token_usage": {
+            "input_tokens": 12,
+            "output_tokens": 8,
+        }
+    })
+
+    assert service.extract_token_usage_from_result(result)["total_tokens"] == 20

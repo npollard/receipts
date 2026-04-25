@@ -1,12 +1,15 @@
 """Interface contracts for clean separation between layers"""
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, TYPE_CHECKING
 from pathlib import Path
-from uuid import UUID
 
 from api_response import APIResponse
 from tracking import TokenUsage
+
+if TYPE_CHECKING:
+    from domain.parsing.receipt_parser import ParsingResult
+    from services.batch_service import BatchObservability
 
 
 class ImageProcessingInterface(ABC):
@@ -32,7 +35,7 @@ class ReceiptParsingInterface(ABC):
     """Interface for receipt parsing operations"""
 
     @abstractmethod
-    def parse_text(self, text: str) -> APIResponse:
+    def parse_text(self, text: str) -> "ParsingResult":
         """Parse receipt text into structured data"""
         pass
 
@@ -53,7 +56,7 @@ class BatchProcessingInterface(ABC):
     @abstractmethod
     def process_batch(self, image_files: List[Path],
                      image_processor: ImageProcessingInterface,
-                     receipt_parser: ReceiptParsingInterface) -> Tuple[int, int, TokenUsage]:
+                     receipt_parser: ReceiptParsingInterface) -> Tuple[int, int, TokenUsage, Optional["BatchObservability"]]:
         """Process multiple images and return results"""
         pass
 

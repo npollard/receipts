@@ -19,8 +19,28 @@ class TokenUsageService:
         """Extract token usage data from API response result"""
         if not result.data:
             return None
-        # TODO: Implement token usage extraction from result
-        return None
+
+        data = result.data
+        if hasattr(data, "model_dump"):
+            data = data.model_dump()
+
+        if not isinstance(data, dict):
+            return None
+
+        token_usage = data.get("_token_usage")
+        if not isinstance(token_usage, dict):
+            return None
+
+        return {
+            "input_tokens": int(token_usage.get("input_tokens", 0)),
+            "output_tokens": int(token_usage.get("output_tokens", 0)),
+            "total_tokens": int(
+                token_usage.get(
+                    "total_tokens",
+                    token_usage.get("input_tokens", 0) + token_usage.get("output_tokens", 0),
+                )
+            ),
+        }
 
     def aggregate_usage(self, usage_list: List[TokenUsage]) -> TokenUsage:
         """Aggregate multiple token usage objects"""

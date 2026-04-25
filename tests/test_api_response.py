@@ -10,6 +10,9 @@ def test_api_response_success():
     response = APIResponse.success(data)
 
     assert response.status == "success"
+    assert response.success is True
+    assert response.is_success is True
+    assert response.is_failure is False
     assert response.data == data
     assert response.error == ""
 
@@ -20,6 +23,9 @@ def test_api_response_failure():
     response = APIResponse.failure(error_msg)
 
     assert response.status == "failed"
+    assert response.success is False
+    assert response.is_success is False
+    assert response.is_failure is True
     assert response.error == error_msg
     assert response.data is None
 
