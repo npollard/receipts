@@ -6,15 +6,15 @@ class ReceiptDataMapper:
     """Convert parser output into repository-friendly plain data."""
 
     def extract(self, parsed: Any) -> Any:
-        if hasattr(parsed, "parsed"):
-            receipt_data = parsed.parsed
-        elif hasattr(parsed, "receipt_data"):
-            receipt_data = parsed.receipt_data
+        # Normalize parsed shapes (dict or object with attributes)
+        if isinstance(parsed, dict) and 'parsed' in parsed:
+            receipt_data = parsed['parsed']
         else:
-            receipt_data = parsed
+            receipt_data = getattr(parsed, 'parsed', None) or getattr(parsed, 'receipt_data', None) or parsed
 
-        if hasattr(receipt_data, "model_dump"):
-            receipt_data = receipt_data.model_dump()
+        model_dump = getattr(receipt_data, 'model_dump', None)
+        if callable(model_dump):
+            receipt_data = model_dump()
         return self.to_plain_data(receipt_data)
 
     def to_plain_data(self, value: Any) -> Any:

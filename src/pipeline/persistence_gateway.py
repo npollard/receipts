@@ -19,10 +19,14 @@ class ReceiptPersistenceGateway:
         ocr_text: str,
         token_usage: Any = None,
     ) -> Any:
-        if hasattr(self.repository, "save_receipt"):
+        save_receipt = getattr(self.repository, 'save_receipt', None)
+        if callable(save_receipt):
             return self._save_receipt(receipt_data, image_path, image_hash, ocr_text, token_usage)
-        if hasattr(self.repository, "save"):
-            return self.repository.save(receipt_data)
+
+        save_fn = getattr(self.repository, 'save', None)
+        if callable(save_fn):
+            return save_fn(receipt_data)
+
         raise AttributeError("Repository has no save method")
 
     def extract_id(self, saved: Any) -> Optional[str]:

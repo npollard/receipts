@@ -22,19 +22,14 @@ import argparse
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
-from pipeline.processor import (
-    ReceiptProcessor,
-    validate_and_get_image_files,
-    save_token_usage_to_persistence,
-    print_usage_summary
-)
+from langchain_core.runnables import RunnableLambda
 from image_processing import VisionProcessor
 from domain.parsing.receipt_parser import ReceiptParser
-from services.batch_service import BatchProcessingService
 from services.token_service import TokenUsageService
 from infrastructure.database import DatabaseManager
+from tracking import TokenUsage
 from config import DATABASE_URL, IS_TEST, app_config, get_runtime_config
 
 # Load environment variables
@@ -47,6 +42,59 @@ logger = logging.getLogger(__name__)
 
 # Log the runtime configuration
 logger.debug(_runtime_config.get_summary())
+
+
+def create_langchain_processing_chain(image_processor: VisionProcessor, receipt_parser: ReceiptParser) -> RunnableLambda:
+    """Create LangChain processing pipeline for receipt processing"""
+    return (
+        RunnableLambda(lambda x: {"image_path": x})
+        | RunnableLambda(lambda x: {**x, "ocr_text": image_processor.extract_text(x["image_path"])})
+        | RunnableLambda(lambda x: {
+            **x,
+            "parse_result": receipt_parser.parse_with_validation_driven_retry(x['ocr_text'], x['image_path'])
+        })
+        | RunnableLambda(lambda x: {
+            "image_path": x["image_path"],
+            "ocr_text": x["ocr_text"],
+            "result": x["parse_result"]
+        })
+    )
+
+
+def process_batch_with_langchain_chain(image_files: List[Path], processing_chain: RunnableLambda) -> Tuple[int, int, TokenUsage]:
+    """Process batch of images using LangChain chain"""
+    successful = 0
+    failed = 0
+    total_token_usage = TokenUsage()
+
+    for image_path in image_files:
+        try:
+            logger.info(f"Processing image: {image_path}")
+            result = processing_chain.invoke(str(image_path))
+
+            # Extract OCR text for logging
+            ocr_text = result['ocr_text']
+            logger.info(f"Extracted Text: {ocr_text[:100]}..." if len(ocr_text) > 100 else f"Extracted Text: {ocr_text}")
+
+            if result["result"].valid and result["result"].parsed:
+                successful += 1
+                logger.info("✅ SUCCESS")
+
+                # Add token usage
+                if result["result"].token_usage:
+                    total_token_usage.add_usage(
+                        result["result"].token_usage.input_tokens,
+                        result["result"].token_usage.output_tokens
+                    )
+            else:
+                failed += 1
+                logger.error("❌ FAILED")
+
+        except Exception as e:
+            failed += 1
+            logger.error(f"❌ FAILED: {str(e)}")
+
+    return successful, failed, total_token_usage
 
 
 def main():
@@ -99,14 +147,19 @@ def main():
     if not image_files:
         return
 
-    # Process batch using controlled concurrency
-    # BatchProcessingService is the SINGLE layer controlling parallelism
-    batch_service = BatchProcessingService(runtime_config=_runtime_config)
-    successful, failed, token_usage, observability = batch_service.process_batch(image_files)
+    # Create LangChain processing chain
+    processing_chain = create_langchain_processing_chain(image_processor, receipt_parser)
 
-    # Print clean batch summary
-    if observability:
-        batch_service.print_batch_summary_clean(observability)
+    # Process batch using LangChain chain
+    successful, failed, token_usage = process_batch_with_langchain_chain(image_files, processing_chain)
+
+    # Print batch summary
+    logger.info("=" * 50)
+    logger.info("BATCH PROCESSING COMPLETE")
+    logger.info(f"✅ Successful: {successful}")
+    logger.info(f"❌ Failed: {failed}")
+    logger.info(f"📊 Success Rate: {(successful / len(image_files) * 100):.1f}%" if image_files else "0.0%")
+    logger.info("=" * 50)
 
     # Use single TokenUsageService instance for persistence and summary
     token_service = TokenUsageService()

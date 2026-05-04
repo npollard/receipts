@@ -62,8 +62,11 @@ class UserRepository:
                 return None
 
             for key, value in kwargs.items():
-                if hasattr(user, key):
+                # Safely attempt to set attribute; ignore unknown fields
+                try:
                     setattr(user, key, value)
+                except AttributeError:
+                    continue
 
             return user_to_dto(user)
 

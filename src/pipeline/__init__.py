@@ -1,25 +1,11 @@
 """Pipeline module for receipt processing"""
 
 from .processor import (
-    ReceiptProcessor,
-    process_receipt,
-    process_single_image,
-    validate_and_get_image_files,
-    print_processing_result,
-    print_batch_summary,
-    print_token_usage_summary,
-    save_token_usage_to_persistence,
-    print_usage_summary
+    Processor,
+    ReceiptProcessor,  # Alias for backwards compatibility
 )
 
 __all__ = [
+    'Processor',
     'ReceiptProcessor',
-    'process_receipt',
-    'process_single_image',
-    'validate_and_get_image_files',
-    'print_processing_result',
-    'print_batch_summary',
-    'print_token_usage_summary',
-    'save_token_usage_to_persistence',
-    'print_usage_summary'
 ]

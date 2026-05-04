@@ -117,7 +117,7 @@ class OCRConfig:
         
         # Apply overrides
         for key, value in kwargs.items():
-            if hasattr(new_config, key):
+            if key in new_config.__dict__:
                 setattr(new_config, key, value)
             else:
                 raise ValueError(f"Unknown configuration parameter: {key}")

@@ -2,7 +2,9 @@
 
 from .receipt_parser import ReceiptParser
 from .parsing_result import ParsingResult
-from .ai_parsing import ReceiptParser as AIParser
+
+# Alias for backwards compatibility
+AIParser = ReceiptParser
 
 __all__ = [
     "ReceiptParser",

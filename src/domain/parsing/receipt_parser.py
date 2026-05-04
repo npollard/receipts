@@ -1,7 +1,6 @@
 """Core receipt parsing functionality"""
 
 from typing import Callable, Dict, Any, Optional
-from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
@@ -419,16 +418,6 @@ Return ONLY valid JSON that addresses the specific error mentioned above.
             return int(token_usage.get(key, 0))
         except (AttributeError, ValueError, TypeError):
             return 0
-
-    @tool
-    def parse_receipt_text(self, ocr_text: str) -> Dict[str, Any]:
-        """LangChain tool for receipt parsing"""
-        result = self.parse_with_usage_tracking(ocr_text)
-
-        if result.success:
-            return result.data
-        else:
-            return {"error": result.error, "status": "failed"}
 
     def get_token_usage_summary(self) -> str:
         """Get current token usage summary"""

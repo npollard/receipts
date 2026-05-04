@@ -401,8 +401,9 @@ class ReceiptRepository:
             if parsed_response.success:
                 # Normalize input safely
                 data = parsed_response.data
-                if hasattr(data, 'model_dump'):
-                    data_dict = data.model_dump()
+                model_dump = getattr(data, 'model_dump', None)
+                if callable(model_dump):
+                    data_dict = model_dump()
                 elif isinstance(data, dict):
                     data_dict = data
                 else:
@@ -414,12 +415,15 @@ class ReceiptRepository:
 
                 # Update receipt fields from parsed data
                 if data:
-                    if hasattr(data, 'date'):
-                        receipt.receipt_date = parse_receipt_date(data.date)
-                    if hasattr(data, 'total'):
-                        receipt.total_amount = data.total
-                    if hasattr(data, 'merchant'):
-                        receipt.merchant_name = extract_merchant_name(data.merchant)
+                    date_val = getattr(data, 'date', None)
+                    if date_val is not None:
+                        receipt.receipt_date = parse_receipt_date(date_val)
+                    total_val = getattr(data, 'total', None)
+                    if total_val is not None:
+                        receipt.total_amount = total_val
+                    merchant_val = getattr(data, 'merchant', None)
+                    if merchant_val is not None:
+                        receipt.merchant_name = extract_merchant_name(merchant_val)
 
                 # Ensure changes are flushed and refreshed
                 session.flush()

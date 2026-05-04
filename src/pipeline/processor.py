@@ -137,21 +137,27 @@ class Processor:
         self._user_context["email"] = email
         # Extract user_id from email or use email as user_id
         self._user_context["user_id"] = email
-        # Update repository user_id if it has one
-        if hasattr(self.repository, 'user_id'):
-            self.repository.user_id = email
-        # Also try setter method if available
-        if hasattr(self.repository, 'set_user_id'):
-            self.repository.set_user_id(email)
+        # Update repository user_id where possible (try attribute, then method)
+        try:
+            setattr(self.repository, 'user_id', email)
+        except Exception:
+            try:
+                method = getattr(self.repository, 'set_user_id', None)
+                if callable(method):
+                    method(email)
+            except Exception:
+                # Repository does not support updating user id; ignore
+                pass
 
     def get_user_context(self) -> dict:
         """Get current user context."""
-        # If repository has user context, use that
-        if hasattr(self.repository, 'user_id'):
-            return {
-                "email": self.repository.user_id,
-                "user_id": self.repository.user_id
-            }
+        # Prefer repository-provided user_id when available
+        try:
+            repo_user = getattr(self.repository, 'user_id')
+            if repo_user:
+                return {"email": repo_user, "user_id": repo_user}
+        except Exception:
+            pass
         return self._user_context
 
     # -----------------------------
@@ -173,8 +179,13 @@ class Processor:
         if existing:
             result.status = PipelineStatus.DUPLICATED
             result.was_duplicate = True
-            result.receipt_id = existing.id if hasattr(existing, "id") else existing.get("id")
-            result.receipt_data = existing if isinstance(existing, dict) else getattr(existing, "__dict__", None)
+            if isinstance(existing, dict):
+                result.receipt_id = existing.get("id")
+                result.receipt_data = existing
+            else:
+                result.receipt_id = getattr(existing, "id", None)
+                # Try to convert to dict when possible
+                result.receipt_data = getattr(existing, "__dict__", None) or existing
             return result
 
         # -----------------------------
@@ -200,9 +211,10 @@ class Processor:
                 error_types=(Exception,),
             )
             self._record_trace("PARSE", True)
-            # Copy token usage from ParsingResult to processor
-            if hasattr(parsed, 'token_usage') and parsed.token_usage:
-                self.token_usage = parsed.token_usage
+            # Copy token usage from ParsingResult to processor (ParsingResult ensures token_usage exists)
+            tu = getattr(parsed, 'token_usage', None)
+            if tu:
+                self.token_usage = tu
 
         except Exception as e:
             self._record_trace("PARSE", False)
@@ -216,11 +228,10 @@ class Processor:
         # -----------------------------
         # VALIDATE
         # -----------------------------
-        # Handle both validate() and validate_receipt() interfaces
-        if hasattr(self.validator, 'validate_receipt'):
-            validation = self.validator.validate_receipt(parsed)
-        elif hasattr(self.validator, 'validate'):
-            validation = self.validator.validate(parsed)
+        # Prefer explicit validator interface methods in order of specificity
+        validate_fn = getattr(self.validator, 'validate_receipt', None) or getattr(self.validator, 'validate', None)
+        if callable(validate_fn):
+            validation = validate_fn(parsed)
         else:
             # Fallback: assume valid if no validator method found
             class FakeValidation:
@@ -282,20 +293,35 @@ class Processor:
 
         # Extract receipt data from ParsingResult if needed
         receipt_data = result.receipt_data if result.receipt_data else {}
-        if hasattr(receipt_data, 'parsed'):
-            parsed_receipt = dict(receipt_data.parsed)  # Make a copy
-            # Add token_usage from ParsingResult if available
-            if hasattr(receipt_data, 'token_usage'):
-                tu = receipt_data.token_usage
+        # Normalize receipt_data shapes (dict, object with attributes, or DTO)
+        parsed_receipt = {}
+        if isinstance(receipt_data, dict) and 'parsed' in receipt_data:
+            parsed_receipt = dict(receipt_data['parsed'])
+            tu = receipt_data.get('token_usage')
+            if tu:
                 parsed_receipt['_token_usage'] = {
                     'input_tokens': tu.input_tokens,
                     'output_tokens': tu.output_tokens,
                     'total_tokens': tu.input_tokens + tu.output_tokens,
                 }
-        elif hasattr(receipt_data, 'receipt_data'):
-            parsed_receipt = receipt_data.receipt_data
         else:
-            parsed_receipt = receipt_data
+            # Try object-style access
+            parsed_obj = getattr(receipt_data, 'parsed', None)
+            if parsed_obj is not None:
+                parsed_receipt = dict(parsed_obj) if isinstance(parsed_obj, dict) else getattr(parsed_obj, '__dict__', {})
+                tu = getattr(receipt_data, 'token_usage', None)
+                if tu:
+                    parsed_receipt['_token_usage'] = {
+                        'input_tokens': tu.input_tokens,
+                        'output_tokens': tu.output_tokens,
+                        'total_tokens': tu.input_tokens + tu.output_tokens,
+                    }
+            else:
+                rd = getattr(receipt_data, 'receipt_data', None)
+                if rd is not None:
+                    parsed_receipt = rd if isinstance(rd, dict) else getattr(rd, '__dict__', {})
+                else:
+                    parsed_receipt = receipt_data if isinstance(receipt_data, dict) else getattr(receipt_data, '__dict__', {})
 
         # Get OCR text from stored value
         ocr_text = getattr(self, '_last_ocr_text', '')
@@ -408,90 +434,7 @@ class Processor:
             token_usage=self.token_usage,
         )
 
-# -----------------------------
-# Backwards compatibility API
-# -----------------------------
-
-def process_receipt(image_path: str, ocr_service, parser, validator, repository):
-    processor = Processor(ocr_service, parser, validator, repository)
-    return processor.process(image_path)
-
-
-def process_single_image(image_path: str, ocr_service, parser, validator, repository):
-    return process_receipt(image_path, ocr_service, parser, validator, repository)
-
-
-def validate_and_get_image_files(paths):
-    import os
-    from pathlib import Path
-
-    # Handle single path (string or Path object)
-    if isinstance(paths, (str, Path)):
-        paths = [paths]
-
-    valid_extensions = {".png", ".jpg", ".jpeg", ".webp"}
-
-    # Collect all image files
-    image_files = []
-    for p in paths:
-        # Convert to Path object if string
-        path_obj = Path(p) if isinstance(p, str) else p
-
-        if not path_obj.exists():
-            continue
-
-        # If it's a directory, scan for images
-        if path_obj.is_dir():
-            for ext in valid_extensions:
-                image_files.extend(path_obj.glob(f"*{ext}"))
-                image_files.extend(path_obj.glob(f"*{ext.upper()}"))
-        # If it's a file with valid extension, add it
-        elif path_obj.is_file() and path_obj.suffix.lower() in valid_extensions:
-            image_files.append(path_obj)
-
-    # Return list of strings for compatibility
-    return [str(p) for p in image_files]
-
-
-# -----------------------------
-# Printing / Reporting Helpers
-# -----------------------------
-
-def print_processing_result(result):
-    """Minimal safe output for a single result"""
-    print(f"Status: {result.status}")
-    print(f"Receipt ID: {result.receipt_id}")
-    print(f"Retry Count: {result.retry_count}")
-
-
-def print_batch_summary(results):
-    """Summarize batch results"""
-    total = len(results)
-    success = sum(1 for r in results if r.status == PipelineStatus.SUCCESS)
-    partial = sum(1 for r in results if r.status == PipelineStatus.PARTIAL)
-    failure = sum(1 for r in results if r.status == PipelineStatus.FAILURE)
-
-    print(f"Total: {total}")
-    print(f"Success: {success}")
-    print(f"Partial: {partial}")
-    print(f"Failure: {failure}")
-
-
-def print_token_usage_summary(*args, **kwargs):
-    """Stub for compatibility"""
-    print("Token usage summary not implemented (stub)")
-
-
-def save_token_usage_to_persistence(*args, **kwargs):
-    """Stub for compatibility"""
-    # no-op
-    return None
-
-
-def print_usage_summary(*args, **kwargs):
-    """Stub for compatibility"""
-    print("Usage summary not implemented (stub)")
-
+# No backwards compatibility stubs - use the main Processor class directly
 
 # Alias for legacy imports
 ReceiptProcessor = Processor

@@ -21,8 +21,9 @@ class TokenUsageService:
             return None
 
         data = result.data
-        if hasattr(data, "model_dump"):
-            data = data.model_dump()
+        model_dump = getattr(data, 'model_dump', None)
+        if callable(model_dump):
+            data = model_dump()
 
         if not isinstance(data, dict):
             return None

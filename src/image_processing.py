@@ -5,7 +5,6 @@ import os
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Tuple
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from contracts.interfaces import ImageProcessingInterface
 from services.ocr_service import OCRService, OCRObservability
@@ -94,13 +93,3 @@ class VisionProcessor(ImageProcessor, ImageProcessingInterface):
     def score_ocr_quality(self, text: str) -> float:
         """Score OCR text quality (0-1)"""
         return self.ocr_service.score_ocr_quality(text)
-
-    @tool
-    def preprocess_image_tool(self, image_path: str) -> Any:
-        """LangChain tool for image preprocessing"""
-        return self.preprocess(image_path)
-
-    @tool
-    def extract_vision_text_tool(self, image_path: str) -> str:
-        """LangChain tool for vision text extraction"""
-        return self.extract_text(image_path)
